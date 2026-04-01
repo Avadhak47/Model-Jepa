@@ -130,9 +130,26 @@ class DecisionTransformerPolicy(BasePolicy):
         self.to(self.device)
 
     def forward(self, inputs: dict) -> dict:
-        z = inputs["latent"].to(self.device)
-        a = inputs.get("prev_action", torch.zeros(z.shape[0], self.action_dim, device=self.device))
-        rtg = inputs.get("return_to_go", torch.zeros(z.shape[0], 1, device=self.device))
-        x = torch.cat([z, a, rtg], dim=-1)
-        action_preds = self.net(x)
-        return {"action_logits": action_preds, "action": action_preds.argmax(dim=-1)}
+        z   = inputs["latent"].to(self.device)
+        a   = inputs.get("prev_action",
+                         torch.zeros(z.shape[0], self.action_dim, device=self.device))
+        rtg = inputs.get("return_to_go",
+                         torch.zeros(z.shape[0], 1, device=self.device))
+        if isinstance(a, torch.Tensor) and a.device != self.device:
+            a = a.to(self.device)
+        if isinstance(rtg, torch.Tensor) and rtg.device != self.device:
+            rtg = rtg.to(self.device)
+        x           = torch.cat([z, a, rtg], dim=-1)
+        action_logits = self.net(x)
+        action      = action_logits.argmax(dim=-1)
+        return {"action_logits": action_logits, "action": action}
+
+    def loss(self, inputs: dict, outputs: dict) -> dict:
+        """
+        Cross-entropy loss against integer action targets.
+        Expects inputs["taken_actions"] as LongTensor [B].
+        """
+        logits  = outputs["action_logits"]                        # [B, A]
+        targets = inputs["taken_actions"].to(self.device).long()  # [B]
+        loss    = torch.nn.functional.cross_entropy(logits, targets)
+        return {"loss": loss}

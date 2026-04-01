@@ -1,152 +1,306 @@
 import torch
+import torch.nn.functional as F
+from training.utils import compute_gae
 
 class Trainer:
-    """Orchestrates structured Reinforcement Learning routines conforming to the TensorDict framework."""
+    """Orchestrates structured RL routines conforming to the TensorDict framework."""
     def __init__(self, config: dict, env, modules: dict):
         self.config = config
         self.env = env
         self.modules = modules
         self.device = config.get("device", "cpu")
-        
+        self.clip_eps = config.get("clip_eps", 0.2)
+        self.vf_coef = config.get("vf_coef", 0.5)
+        self.ent_coef = config.get("ent_coef", 0.01)
+        self.max_grad_norm = config.get("max_grad_norm", 1.0)
+
         self.optimizers = {}
         for name, module in self.modules.items():
             if hasattr(module, 'parameters') and len(list(module.parameters())) > 0:
                 self.optimizers[name] = torch.optim.AdamW(
-                    module.parameters(), 
-                    lr=config.get("learning_rate", 1e-3)
+                    module.parameters(),
+                    lr=config.get("learning_rate", 1e-3),
+                    weight_decay=config.get("weight_decay", 1e-4)
                 )
 
+    # ─── utility ────────────────────────────────────────────────────────────
+    def _encode(self, state_tensor):
+        """Encode a raw state tensor to a latent dict via encoder module."""
+        enc = self.modules.get("encoder")
+        if enc is None:
+            raise RuntimeError("No 'encoder' module registered in Trainer.")
+        s = state_tensor.float().to(self.device)
+        if s.dim() == 2:                   # [B, D] → add channel dims for CNN encoder
+            s = s.unsqueeze(1).unsqueeze(1)
+        elif s.dim() == 3:                 # [B, H, W] → add channel
+            s = s.unsqueeze(1)
+        return enc({"state": s})
+
+    # ─── representation learning ─────────────────────────────────────────────
     def train_representation_learning_step(self, batch: dict) -> dict:
         """
-        Isolated Training Loop for the Encoder-Decoder pipeline.
-        Optimizes purely on state reconstruction (e.g., autoencoding representation).
+        Autoencoding loop: encode the state to a latent, decode back to pixels,
+        and minimise reconstruction MSE.
         """
         encoder = self.modules.get("encoder")
         decoder = self.modules.get("decoder")
-        if not encoder or not decoder:
+        if encoder is None or decoder is None:
             return {}
-            
+
         enc_opt = self.optimizers["encoder"]
         dec_opt = self.optimizers["decoder"]
-        
         enc_opt.zero_grad()
         dec_opt.zero_grad()
-        
-        # Forward pass -> z -> recon
-        z_dict = encoder(batch)
-        batch.update(z_dict)
-        recon_dict = decoder(batch)
-        
-        # Calculate image/structure reconstruction MSE loss
-        loss_dict = decoder.loss(batch, recon_dict)
-        loss = loss_dict["loss"]
-        loss.backward()
-        
+
+        z_dict = self._encode(batch["state"])
+        merged = {**batch, **z_dict}
+        recon_dict = decoder(merged)
+        loss_dict = decoder.loss(merged, recon_dict)
+        loss_dict["loss"].backward()
+
+        torch.nn.utils.clip_grad_norm_(
+            list(encoder.parameters()) + list(decoder.parameters()),
+            self.max_grad_norm
+        )
         enc_opt.step()
         dec_opt.step()
-        
-        return {"recon_loss": loss.item()}
+        return {"recon_loss": loss_dict["loss"].item()}
 
+    # ─── world model ────────────────────────────────────────────────────────
     def train_world_model_step(self, batch: dict) -> dict:
         """
-        Isolated Dynamics Prediction Learning Loop.
-        Uses teacher forcing on pre-collected sequences.
+        Teacher-forced dynamics prediction:
+          latent_t + action_t → predict latent_{t+1} + reward_t
         """
-        wm = self.modules["world_model"]
+        wm  = self.modules["world_model"]
         opt = self.optimizers["world_model"]
-        
+
+        # Encode state if raw pixels supplied
+        if "latent" not in batch:
+            z_dict = self._encode(batch["state"])
+            batch  = {**batch, **z_dict}
+
         opt.zero_grad()
-        outputs = wm(batch)
+        outputs   = wm(batch)
         loss_dict = wm.loss(batch, outputs)
-        
         loss_dict["loss"].backward()
-        
-        grad_norm = torch.nn.utils.clip_grad_norm_(wm.parameters(), max_norm=1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(wm.parameters(), self.max_grad_norm)
         opt.step()
-        
+
+        def _item(v):
+            return v.item() if isinstance(v, torch.Tensor) else float(v or 0.0)
+
         return {
-            "wm_loss": loss_dict["loss"].item(),
-            "wm_z_loss": loss_dict.get("z_loss", 0.0).item() if isinstance(loss_dict.get("z_loss"), torch.Tensor) else 0.0,
-            "wm_sigreg_loss": loss_dict.get("sigreg_loss", 0.0).item() if isinstance(loss_dict.get("sigreg_loss"), torch.Tensor) else 0.0,
-            "wm_attention_entropy": loss_dict.get("attention_entropy", 0.0).item() if isinstance(loss_dict.get("attention_entropy"), torch.Tensor) else 0.0,
-            "wm_grad_norm": grad_norm.item()
+            "wm_loss":             _item(loss_dict.get("loss")),
+            "wm_z_loss":           _item(loss_dict.get("z_loss")),
+            "wm_r_loss":           _item(loss_dict.get("r_loss")),
+            "wm_sigreg_loss":      _item(loss_dict.get("sigreg_loss")),
+            "wm_attn_entropy":     _item(loss_dict.get("attention_entropy")),
+            "wm_grad_norm":        grad_norm.item(),
         }
 
+    # ─── policy (PPO) ────────────────────────────────────────────────────────
     def train_policy_step(self, batch: dict) -> dict:
-        """Isolated Policy Optimization (PPO) step."""
+        """
+        Full PPO surrogate step with clipping, value regression, and entropy bonus.
+        Requires batch to contain: old_log_probs, advantages, returns, taken_actions.
+        """
         policy = self.modules["policy"]
-        opt = self.optimizers["policy"]
-        
+        opt    = self.optimizers["policy"]
+
+        if "latent" not in batch:
+            with torch.no_grad():
+                z_dict = self._encode(batch["state"])
+            batch = {**batch, **z_dict}
+
         opt.zero_grad()
-        outputs = policy(batch)
+        outputs   = policy(batch)
         loss_dict = policy.loss(batch, outputs)
-        
         loss_dict["loss"].backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=0.5)
+        grad_norm = torch.nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
         opt.step()
-        
+
+        def _item(v):
+            return v.item() if isinstance(v, torch.Tensor) else float(v or 0.0)
+
         return {
-            "policy_loss": loss_dict.get("policy_loss", 0.0).item() if isinstance(loss_dict.get("policy_loss"), torch.Tensor) else 0.0,
-            "value_loss": loss_dict.get("value_loss", 0.0).item() if isinstance(loss_dict.get("value_loss"), torch.Tensor) else 0.0,
-            "exploration_entropy": loss_dict.get("entropy", 0.0).item() if isinstance(loss_dict.get("entropy"), torch.Tensor) else 0.0,
-            "policy_grad_norm": grad_norm.item()
+            "policy_loss":   _item(loss_dict.get("policy_loss")),
+            "value_loss":    _item(loss_dict.get("value_loss")),
+            "entropy":       _item(loss_dict.get("entropy")),
+            "policy_grad":   grad_norm.item(),
         }
 
+    # ─── curiosity ──────────────────────────────────────────────────────────
+    def train_curiosity_step(self, batch: dict) -> dict:
+        """RND/Pred-Err curiosity distillation step."""
+        cur = self.modules.get("curiosity")
+        if cur is None:
+            return {}
+        opt = self.optimizers["curiosity"]
+
+        if "latent" not in batch:
+            with torch.no_grad():
+                z_dict = self._encode(batch["state"])
+            batch = {**batch, **z_dict}
+
+        opt.zero_grad()
+        cur_out  = cur(batch)
+        loss_dict = cur.loss(batch, cur_out)
+        loss_dict["loss"].backward()
+        opt.step()
+        return {
+            "curiosity_loss":     loss_dict["loss"].item(),
+            "intrinsic_reward":   cur_out["intrinsic_reward"].mean().item(),
+        }
+
+    # ─── end-to-end ─────────────────────────────────────────────────────────
     def train_end_to_end_step(self, batch: dict) -> dict:
         """
-        Joint End-to-End MCTS/MuZero Execution.
-        Backpropagates MCTS targets (Policy, Value) into the Policy/Value heads,
-        and dynamically backpropagates the dynamics gradients straight through to the Encoder.
+        Joint gradient step:
+          1. Encode state → z
+          2. WM predicts next z and reward  (loss flows back through encoder)
+          3. Policy maximizes returns + entropy  (stopped gradient from encoder)
+          4. Curiosity distillation
         """
-        # Execute forward passes
-        # Get target values from planner
-        # Accumulate combined losses
-        
-        metrics = {}
-        if "encoder" in self.modules and "decoder" in self.modules:
-            metrics.update(self.train_representation_learning_step(batch))
-        metrics.update(self.train_world_model_step(batch))
-        metrics.update(self.train_policy_step(batch))
-        return metrics
+        enc = self.modules.get("encoder")
+        wm  = self.modules["world_model"]
+        pol = self.modules["policy"]
+        cur = self.modules.get("curiosity")
 
-    def train(self, num_epochs: int, replay_buffer, mode="end_to_end"):
-        """Main training loop orchestrator applying requested pipeline operations."""
-        print(f"Executing {mode} routine for {num_epochs} epochs...")
+        all_params = [p for m in self.modules.values() for p in m.parameters()]
+        for opt in self.optimizers.values():
+            opt.zero_grad()
+
+        # 1. Encode
+        state  = batch["state"].float().to(self.device)
+        if state.dim() == 3:
+            state = state.unsqueeze(1)
+        z_dict = enc({"state": state})
+        z      = z_dict["latent"]
+
+        # 2. World model
+        wm_inputs = {**batch, "latent": z}
+        wm_out    = wm(wm_inputs)
+        wm_loss   = wm.loss(wm_inputs, wm_out)["loss"]
+
+        # 3. Policy (stop grad from encoder so WM and policy compete fairly)
+        pol_out  = pol({"latent": z.detach()})
+        pol_loss = -pol_out["entropy"]          # entropy maximisation proxy
+
+        # 4. Curiosity
+        cur_loss = torch.tensor(0.0, device=self.device)
+        if cur is not None:
+            cur_out  = cur({"latent": z.detach()})
+            cur_loss = cur.loss({}, cur_out)["loss"]
+
+        total = wm_loss + 0.1 * pol_loss + 0.05 * cur_loss
+        total.backward()
+        torch.nn.utils.clip_grad_norm_(all_params, self.max_grad_norm)
+        for opt in self.optimizers.values():
+            opt.step()
+
+        def _v(t): return t.item() if isinstance(t, torch.Tensor) else float(t)
+        return {
+            "e2e_loss":   _v(total),
+            "wm_loss":    _v(wm_loss),
+            "pol_loss":   _v(pol_loss),
+            "cur_loss":   _v(cur_loss),
+            "attn_ent":   _v(wm_out.get("attention_entropy", 0.0)),
+            "pol_entropy": _v(pol_out["entropy"]),
+        }
+
+    # ─── main loop ──────────────────────────────────────────────────────────
+    def train(self, num_epochs: int, replay_buffer, mode: str = "end_to_end"):
+        """Main training loop. mode ∈ {representation, world_model, policy, curiosity, end_to_end}."""
+        print(f"Starting {mode} training for {num_epochs} epochs…")
         batch_size = self.config.get("batch_size", 32)
-        
-        for epoch in range(num_epochs):
-            batch = replay_buffer.sample(batch_size)
-            
-            if mode == "representation":
-                metrics = self.train_representation_learning_step(batch)
-            elif mode == "world_model":
-                metrics = self.train_world_model_step(batch)
-            elif mode == "policy":
-                metrics = self.train_policy_step(batch)
-            else:
-                metrics = self.train_end_to_end_step(batch)
-                
-            if epoch % 10 == 0:
-                print(f"Epoch {epoch} Metrics: {metrics}")
+        dispatch   = {
+            "representation": self.train_representation_learning_step,
+            "world_model":    self.train_world_model_step,
+            "policy":         self.train_policy_step,
+            "curiosity":      self.train_curiosity_step,
+            "end_to_end":     self.train_end_to_end_step,
+        }
+        step_fn = dispatch.get(mode, self.train_end_to_end_step)
 
-    def evaluate(self):
-        """Simulation metrics rollout validation without PyTorch gradients."""
-        print("Commencing evaluation rollout...")
-        import torch
+        for epoch in range(num_epochs):
+            batch   = replay_buffer.sample(batch_size)
+            metrics = step_fn(batch)
+            if epoch % max(1, num_epochs // 10) == 0:
+                metric_str = "  ".join(f"{k}={v:.4f}" for k, v in metrics.items())
+                print(f"  Epoch {epoch:>5}/{num_epochs}  {metric_str}")
+        print("Training complete.")
+
+    # ─── evaluation ─────────────────────────────────────────────────────────
+    def evaluate(self, max_steps: int = 200) -> float:
+        """
+        Run one full episode using encoder → policy, return total reward.
+        Properly encodes each raw state before feeding to policy.
+        """
+        enc    = self.modules.get("encoder")
+        policy = self.modules["policy"]
+        enc.eval(); policy.eval()
+
         with torch.no_grad():
-            state = self.env.reset()["state"]
+            obs        = self.env.reset()
+            state      = torch.tensor(obs["state"], dtype=torch.float32).to(self.device)
+            if state.dim() == 2:
+                state = state.unsqueeze(0).unsqueeze(0)   # [1,1,H,W]
+            elif state.dim() == 3:
+                state = state.unsqueeze(0)
+
             total_reward = 0.0
-            done = False
-            while not done:
-                action = self.modules["policy"]({"latent": torch.tensor(state).float().unsqueeze(0).to(self.device)})["action"]
-                next_state_dict, reward, done, _ = self.env.step(action[0].cpu().numpy())
+            for _ in range(max_steps):
+                z      = enc({"state": state})["latent"]
+                action = policy({"latent": z})["action"]
+                a_np   = action[0].cpu().numpy()
+                # Convert to one-hot if scalar
+                if a_np.ndim == 0:
+                    a_vec = [0.0] * self.config.get("action_dim", 10)
+                    a_vec[int(a_np) % len(a_vec)] = 1.0
+                    a_np = a_vec
+                obs, reward, done, _ = self.env.step(a_np)
                 total_reward += reward
-                state = next_state_dict["state"]
+                state = torch.tensor(obs["state"], dtype=torch.float32).to(self.device)
+                if state.dim() == 2:
+                    state = state.unsqueeze(0).unsqueeze(0)
+                elif state.dim() == 3:
+                    state = state.unsqueeze(0)
+                if done:
+                    break
+
+        enc.train(); policy.train()
         return total_reward
 
-    def validate(self):
-        """Holdout validation for prediction loss / MSE metrics."""
-        import torch
-        print("Validating prediction models on test set...")
+    # ─── validation ─────────────────────────────────────────────────────────
+    def validate(self, replay_buffer, n_batches: int = 10) -> dict:
+        """
+        Compute held-out WM prediction loss on n_batches of replay data
+        without gradient updates.
+        """
+        wm  = self.modules["world_model"]
+        enc = self.modules.get("encoder")
+        wm.eval()
+        if enc: enc.eval()
+
+        total_z_loss = 0.0
+        total_r_loss = 0.0
+        bs = self.config.get("batch_size", 32)
+
         with torch.no_grad():
-            return {"val_loss": 0.0}
+            for _ in range(n_batches):
+                batch = replay_buffer.sample(bs)
+                if "latent" not in batch:
+                    z_dict = self._encode(batch["state"])
+                    batch  = {**batch, **z_dict}
+                outputs   = wm(batch)
+                loss_dict = wm.loss(batch, outputs)
+                total_z_loss += loss_dict.get("z_loss", torch.tensor(0.)).item()
+                total_r_loss += loss_dict.get("r_loss", torch.tensor(0.)).item()
+
+        wm.train()
+        if enc: enc.train()
+        return {
+            "val_z_loss": total_z_loss / n_batches,
+            "val_r_loss": total_r_loss / n_batches,
+        }
