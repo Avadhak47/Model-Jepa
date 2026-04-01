@@ -45,7 +45,8 @@ class ReARCDataset:
         return out
 
     def _load(self, path: pathlib.Path):
-        task_files = sorted(path.glob("*.json"))
+        # Recursively search for JSON files in case they are in re_arc/tasks/
+        task_files = sorted(path.rglob("*.json"))
         if not task_files:
             print(f"Warning: no .json files found in '{path}'. Using mock data.")
             self._use_mock()

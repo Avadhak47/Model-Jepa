@@ -12,20 +12,31 @@ echo "=== NS-ARC Kaggle Setup ==="
 # 1. Install Python dependencies
 pip install -q wandb umap-learn scikit-learn tqdm
 
-# 2. Clone Re-ARC dataset (40k+ procedurally generated pairs)
-#    Re-ARC is recommended over ARC-AGI-1 for training as it has
-#    100 generated grid pairs per task (400 tasks = 40,000+ pairs).
+# 2. Clone Re-ARC dataset (~40k generated grid pairs)
 if [ ! -d "data/re-arc" ]; then
-    echo "Cloning Re-ARC dataset (~40k generated grid pairs)..."
+    echo "Cloning Re-ARC repository..."
     git clone --quiet https://github.com/michaelhodel/re-arc data/re-arc
-    echo "Re-ARC cloned: $(ls data/re-arc/*.json 2>/dev/null | wc -l | tr -d ' ') task files"
 fi
 
-# 3. Set W&B key (update below or set WANDB_API_KEY env var before running)
-# export WANDB_API_KEY="YOUR_KEY_HERE"
+# 3. Handle Zip Extraction (Puzzles are in re_arc.zip)
+cd data/re-arc
+if [ ! -d "re_arc/tasks" ]; then
+    echo "Extracting re_arc.zip..."
+    unzip -q re_arc.zip
+    # This creates data/re-arc/re_arc/tasks/*.json
+fi
+
+if [ ! -d "arc_original/tasks" ]; then
+    echo "Extracting arc_original.zip..."
+    unzip -q arc_original.zip
+    # This creates data/re-arc/arc_original/tasks/*.json
+fi
+cd ../..
+
+echo "Setup complete. Puzzles located in data/re-arc/re_arc/tasks/"
+
+# 4. Verification
+echo "Re-ARC Tasks: $(ls data/re-arc/re_arc/tasks/*.json 2>/dev/null | wc -l | tr -d ' ')"
+echo "GPU available: $(python -c 'import torch; print(torch.cuda.is_available())')"
 
 echo "=== Setup complete ==="
-echo "GPU  : $(python -c 'import torch; print(torch.cuda.is_available())')"
-echo "Name : $(python -c 'import torch; print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU")')"
-echo ""
-echo "Dataset: set REARC_DATA_PATH=data/re-arc in notebook Cell 2 (setup)"

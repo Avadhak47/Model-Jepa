@@ -67,7 +67,8 @@ class ARCEnvironment(BaseEnvironment):
             config.get("arc_path", "data/re-arc"))
         )
         if data_path.is_dir():
-            task_files = sorted(data_path.glob("*.json"))
+            # Recursively search for JSON files (e.g. in re_arc/tasks/)
+            task_files = sorted(data_path.rglob("*.json"))
             for fpath in task_files:
                 try:
                     examples = json.loads(fpath.read_text())
