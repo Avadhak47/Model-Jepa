@@ -1,0 +1,66 @@
+# NS-ARC Framework Configuration
+
+project: "NS-ARC-Agent"
+seed: 42
+
+# ─── Architecture ──────────────────────────────────────────────────────────
+latent_dim: 128
+action_dim: 10
+hidden_dim: 256
+
+# ─── World Model ───────────────────────────────────────────────────────────
+# Choices: TransformerWorldModel | TransformerWorldModel32 | 64 | 128
+world_model: "TransformerWorldModel"
+num_layers: 4
+nhead: 8
+use_attn_res: false
+
+# Model Depth Profiles (used via --profile flag in main.py)
+# base:    num_layers=4,   use_attn_res=false
+# deep32:  num_layers=32,  use_attn_res=true
+# deep64:  num_layers=64,  use_attn_res=true
+# deep128: num_layers=128, use_attn_res=true
+
+# ─── Encoder / Policy ──────────────────────────────────────────────────────
+# encoder choices: MLPEncoder | CNNEncoder | TransformerEncoder
+encoder: "CNNEncoder"
+# policy choices: PPOPolicy | DQNPolicy | DecisionTransformerPolicy
+policy: "PPOPolicy"
+
+# ─── PPO ───────────────────────────────────────────────────────────────────
+ent_coef: 0.01
+clip_eps: 0.2
+gamma: 0.99
+lam: 0.95            # GAE lambda
+value_coef: 0.5
+
+# ─── Curiosity ─────────────────────────────────────────────────────────────
+curiosity_type: "RNDCuriosity"   # RNDCuriosity | PredErrCuriosity | EnsembleDisagreementCuriosity
+curiosity_scale: 0.5
+
+# ─── MCTS ──────────────────────────────────────────────────────────────────
+num_simulations: 50
+pb_c_init: 1.25
+pb_c_base: 19652
+cem_iters: 5
+cem_samples: 100
+cem_horizon: 10
+
+# ─── Symbolic / Vocab ──────────────────────────────────────────────────────
+vocab_size: 50
+
+# ─── Dataset ───────────────────────────────────────────────────────────────
+# dataset choices: ARC | ReARC | Terrain
+dataset: "ARC"
+arc_data_path: "./data/ARC-AGI/data/training"   # folder of .json ARC task files
+
+# ─── Training ──────────────────────────────────────────────────────────────
+train_mode: "world_model"   # representation | world_model | policy | end_to_end
+batch_size: 32
+learning_rate: 0.001
+epochs: 100
+replay_capacity: 50000
+
+# ─── Hardware ──────────────────────────────────────────────────────────────
+# "auto" selects cuda > mps > cpu automatically
+device: "auto"
