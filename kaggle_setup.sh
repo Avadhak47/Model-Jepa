@@ -9,8 +9,16 @@ set -e
 
 echo "=== NS-ARC Kaggle Setup ==="
 
-# 1. Install Python dependencies
-pip install -q wandb umap-learn scikit-learn tqdm
+# 1. Fetch Repository Code if running on Kaggle
+if [ ! -f "data/rearc_dataset.py" ]; then
+    echo "Kaggle environment detected. Fetching project code..."
+    git clone --quiet https://github.com/Avadhak47/Model-Jepa .tmp_repo
+    cp -rn .tmp_repo/* .
+    rm -rf .tmp_repo
+fi
+
+# 2. Install Python dependencies
+pip install -q wandb umap-learn scikit-learn tqdm seaborn
 
 # 2. Clone Re-ARC dataset (~40k generated grid pairs)
 if [ ! -d "data/re-arc" ]; then
