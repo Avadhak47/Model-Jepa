@@ -7,6 +7,8 @@
 
 set -e
 
+PROJECT_ROOT="/kaggle/working/Model-Jepa"
+
 echo "=== NS-ARC Kaggle Setup ==="
 
 # 1. Fetch Repository Code if running on Kaggle
