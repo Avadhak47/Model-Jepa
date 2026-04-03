@@ -203,11 +203,14 @@ class TransformerWorldModel(BaseWorldModel):
         target_z = inputs["target_latent"].to(self.device)
         target_r = inputs["target_reward"].to(self.device)
         
-        pred_z = outputs["next_latent"]
-        pred_r = outputs["predicted_reward"]
-        
+        # Ensure shapes match to prevent broadcasting warnings
+        if pred_z.dim() > target_z.dim():
+            pred_z = pred_z.squeeze(1)
+        if pred_r.dim() > target_r.dim():
+            pred_r = pred_r.squeeze(-1)
+
         z_loss = F.mse_loss(pred_z, target_z)
-        r_loss = F.mse_loss(pred_r.squeeze(-1), target_r)
+        r_loss = F.mse_loss(pred_r, target_r)
         
         std_z = torch.sqrt(pred_z.var(dim=0) + 1e-4).mean()
         sigreg_loss = F.relu(1.0 - std_z)
