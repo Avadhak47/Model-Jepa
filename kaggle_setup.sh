@@ -12,7 +12,7 @@ PROJECT_ROOT="/kaggle/working/Model-Jepa"
 echo "=== NS-ARC Kaggle Setup ==="
 
 # 1. Fetch Repository Code if running on Kaggle
-if [ ! -f "data/rearc_dataset.py" ]; then
+if [ ! -f "arc_data/rearc_dataset.py" ]; then
     echo "Kaggle environment detected. Fetching project code..."
     git clone --quiet https://github.com/Avadhak47/Model-Jepa .tmp_repo
     cp -rn .tmp_repo/* .
@@ -23,7 +23,7 @@ fi
 pip install -q wandb umap-learn scikit-learn tqdm seaborn
 
 # 2. Clone Re-ARC dataset (~40k generated grid pairs)
-if [ ! -d "data/re-arc" ]; then
+if [ ! -d "arc_data/re-arc" ]; then
     echo "Cloning Re-ARC repository..."
     git clone --quiet https://github.com/michaelhodel/re-arc data/re-arc
 fi

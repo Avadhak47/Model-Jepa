@@ -90,7 +90,7 @@ class TestModules(unittest.TestCase):
         self.assertIn("intrinsic_reward", out)
 
     def test_arc_dataset_sample(self):
-        from data.arc_dataset import ARCDataset
+        from arc_data.arc_dataset import ARCDataset
         ds = ARCDataset("./nonexistent_path")
         batch = ds.sample(4)
         self.assertEqual(batch["state"].shape, (4, 1, 30, 30))

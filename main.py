@@ -36,9 +36,9 @@ CURIOSITY_REGISTRY = {
 }
 
 DATASET_REGISTRY = {
-    "ARC":     ("data.arc_dataset",     "ARCDataset"),
-    "ReARC":   ("data.rearc_dataset",   "ReARCDataset"),
-    "Terrain": ("data.terrain_dataset", "TerrainDataset"),
+    "ARC":     ("arc_data.arc_dataset",     "ARCDataset"),
+    "ReARC":   ("arc_data.rearc_dataset",   "ReARCDataset"),
+    "Terrain": ("arc_data.terrain_dataset", "TerrainDataset"),
 }
 
 def _load_class(module_path, class_name):
@@ -95,13 +95,13 @@ def main():
     dataset_key = config.get("dataset", "ARC")
     arc_path = config.get("arc_data_path", "./data/arc-agi/training")
     if dataset_key == "ARC":
-        Dataset = _load_class("data.arc_dataset", "ARCDataset")
+        Dataset = _load_class("arc_data.arc_dataset", "ARCDataset")
         dataset = Dataset(arc_path)
     elif dataset_key == "Terrain":
-        Dataset = _load_class("data.terrain_dataset", "TerrainDataset")
+        Dataset = _load_class("arc_data.terrain_dataset", "TerrainDataset")
         dataset = Dataset(config)
     else:
-        Dataset = _load_class("data.rearc_dataset", "ReARCDataset")
+        Dataset = _load_class("arc_data.rearc_dataset", "ReARCDataset")
         dataset = Dataset(arc_path)
 
     # ─── Build Modules ────────────────────────────────────────
