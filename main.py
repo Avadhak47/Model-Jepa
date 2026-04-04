@@ -139,7 +139,14 @@ def main():
         print(f"Validation metrics: {result}")
     elif args.mode == "comprehensive_eval":
         from analysis.evaluate_model import ComprehensiveEvaluator
-        evaluator = ComprehensiveEvaluator(config, env, modules, dataset)
+        name_map = {
+            "base": "base", 
+            "deep32": "NSARC-32", 
+            "deep64": "NSARC-64", 
+            "deep128": "NSARC-128"
+        }
+        model_name = name_map.get(args.profile, "base")
+        evaluator = ComprehensiveEvaluator(config, env, modules, dataset, model_name=model_name)
         evaluator.run_full_diagnostics(n_episodes=10)
     else:
         sample = dataset.sample(4)

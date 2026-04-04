@@ -23,6 +23,9 @@ class ARCDataset:
             print(f"Warning: ARC path '{data_path}' not found. Generating minimal mock JSON structures.")
             self.tasks.append({"train": [{"input": [[0,1],[1,0]], "output": [[1,0],[0,1]]}]})
         
+    def __len__(self):
+        return len(self.tasks)
+        
     def pad_grid(self, grid: list) -> np.ndarray:
         arr = np.array(grid)
         h, w = arr.shape

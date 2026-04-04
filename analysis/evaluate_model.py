@@ -86,7 +86,13 @@ class ComprehensiveEvaluator:
         latents = []
         labels = [] # We use the 'target_reward' as dummy labels if task IDs aren't available
         
-        batch = self.dataset.sample(min(100, len(self.dataset)))
+        # Handle datasets without len() gracefully, though we added it to ARC/Terrain now.
+        try:
+            d_len = len(self.dataset)
+        except TypeError:
+            d_len = 1000 # Fallback for generator datasets
+            
+        batch = self.dataset.sample(min(100, d_len))
         states = batch["state"].to(self.device).float()
         
         with torch.no_grad():

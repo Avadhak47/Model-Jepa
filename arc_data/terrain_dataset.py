@@ -6,6 +6,9 @@ class TerrainDataset:
         self.config = config
         self.dim = config.get("latent_dim", 128)
 
+    def __len__(self):
+        return 10000 # Generator-style datasets have arbitrary large length for evaluation batches
+
     def sample(self, batch_size: int) -> dict:
         """Creates procedural mathematical noises to simulate infinite state terrains."""
         noise_states = torch.randn(batch_size, self.dim)
