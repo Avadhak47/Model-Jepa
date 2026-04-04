@@ -57,7 +57,7 @@ def build_module(registry: dict, key: str, config: dict):
 def parse_args():
     parser = argparse.ArgumentParser(description="NS-ARC Framework Driver")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to YAML config")
-    parser.add_argument("--mode", choices=["train", "eval", "validate", "debug"], default="train")
+    parser.add_argument("--mode", choices=["train", "eval", "validate", "debug", "comprehensive_eval"], default="train")
     parser.add_argument("--arc-data", type=str, default=None, help="Path to ARC JSON folder")
     parser.add_argument("--profile", choices=["base", "deep32", "deep64", "deep128"], default="base",
                         help="Model depth profile override")
@@ -135,8 +135,12 @@ def main():
         result = trainer.evaluate()
         print(f"Eval total reward: {result}")
     elif args.mode == "validate":
-        result = trainer.validate()
+        result = trainer.validate(replay)
         print(f"Validation metrics: {result}")
+    elif args.mode == "comprehensive_eval":
+        from analysis.evaluate_model import ComprehensiveEvaluator
+        evaluator = ComprehensiveEvaluator(config, env, modules, dataset)
+        evaluator.run_full_diagnostics(n_episodes=10)
     else:
         sample = dataset.sample(4)
         print("Debug sample shapes:", {k: v.shape for k, v in sample.items()})
