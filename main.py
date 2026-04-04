@@ -117,11 +117,20 @@ def main():
     total_params = sum(p.numel() for m in modules.values() for p in m.parameters())
     print(f"  Total parameters: {total_params:,}")
 
+    # Determine the checkpoint profile name
+    name_map = {
+        "base": "base", 
+        "deep32": "NSARC-32", 
+        "deep64": "NSARC-64", 
+        "deep128": "NSARC-128"
+    }
+    model_name = name_map.get(args.profile, "base")
+
     # ─── Build Trainer ────────────────────────────────────────
     from training.trainer import Trainer
     from envs.arc_env import ARCEnvironment
     env = ARCEnvironment(config)
-    trainer = Trainer(config, env, modules)
+    trainer = Trainer(config, env, modules, model_name=model_name)
 
     # ─── Run ──────────────────────────────────────────────────
     from training.replay_buffer import ReplayBuffer
@@ -139,13 +148,6 @@ def main():
         print(f"Validation metrics: {result}")
     elif args.mode == "comprehensive_eval":
         from analysis.evaluate_model import ComprehensiveEvaluator
-        name_map = {
-            "base": "base", 
-            "deep32": "NSARC-32", 
-            "deep64": "NSARC-64", 
-            "deep128": "NSARC-128"
-        }
-        model_name = name_map.get(args.profile, "base")
         evaluator = ComprehensiveEvaluator(config, env, modules, dataset, model_name=model_name)
         evaluator.run_full_diagnostics(n_episodes=10)
     else:

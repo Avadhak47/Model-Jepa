@@ -56,9 +56,9 @@ class TransformerEncoder(BaseEncoder):
     """Vision Transformer (ViT) backbone with CLS token projection designed to prevent representation collapse."""
     def __init__(self, config: dict):
         super().__init__(config)
-        in_channels = config.get("in_channels", 3)
+        in_channels = config.get("in_channels", 1)
         patch_size = config.get("patch_size", 14)
-        embed_dim = config.get("hidden_dim", 192)
+        embed_dim = config.get("hidden_dim", 256)
         latent_dim = config.get("latent_dim", 128)
         
         self.patch_embed = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
@@ -74,7 +74,7 @@ class TransformerEncoder(BaseEncoder):
                 nhead = h
                 break
         encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=nhead, dim_feedforward=embed_dim*4, batch_first=True, norm_first=True)
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=12)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=config.get("encoder_layers", 4))
         
         # Crucial anti-collapse projection (LeWM Section 3.1)
         self.projector = nn.Sequential(

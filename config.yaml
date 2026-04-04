@@ -7,6 +7,8 @@ seed: 42
 latent_dim: 128
 action_dim: 10
 hidden_dim: 256
+in_channels: 1
+encoder_layers: 4
 
 # ─── World Model ───────────────────────────────────────────────────────────
 # Choices: TransformerWorldModel | TransformerWorldModel32 | 64 | 128

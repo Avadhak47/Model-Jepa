@@ -1,18 +1,27 @@
+import os
+import shutil
 import torch
 import torch.nn.functional as F
+from datetime import datetime
 from training.utils import compute_gae
+from analysis.plot_utils import plot_reconstruction_dashboard
 
 class Trainer:
     """Orchestrates structured RL routines conforming to the TensorDict framework."""
-    def __init__(self, config: dict, env, modules: dict):
+    def __init__(self, config: dict, env, modules: dict, model_name: str = "base"):
         self.config = config
         self.env = env
         self.modules = modules
+        self.model_name = model_name
         self.device = config.get("device", "cpu")
         self.clip_eps = config.get("clip_eps", 0.2)
         self.vf_coef = config.get("vf_coef", 0.5)
         self.ent_coef = config.get("ent_coef", 0.01)
         self.max_grad_norm = config.get("max_grad_norm", 1.0)
+        
+        self.ckpt_dir = f"./checkpoints/{self.model_name}"
+        os.makedirs(self.ckpt_dir, exist_ok=True)
+        os.makedirs("evaluation_reports/plots", exist_ok=True)
 
         self.optimizers = {}
         for name, module in self.modules.items():
@@ -226,10 +235,74 @@ class Trainer:
         for epoch in range(num_epochs):
             batch   = replay_buffer.sample(batch_size)
             metrics = step_fn(batch)
+            
+            # 1. Visualization (Every 5 epochs for Stage 1 / Representation)
+            if mode == "representation" and epoch % 5 == 0:
+                self._visualize_diagnostics(batch, epoch)
+
+            # 2. Metrics Logging
             if epoch % max(1, num_epochs // 10) == 0:
                 metric_str = "  ".join(f"{k}={v:.4f}" for k, v in metrics.items())
                 print(f"  Epoch {epoch:>5}/{num_epochs}  {metric_str}")
-        print("Training complete.")
+            
+            # 3. Rolling Checkpointing (Every epoch)
+            self._save_checkpoint_rolling(epoch)
+
+        print(f"Training complete. Checkpoints saved to {self.ckpt_dir}")
+
+    def _save_checkpoint_rolling(self, epoch):
+        """Save weights every epoch, keeping only the last 5."""
+        epoch_dir = os.path.join(self.ckpt_dir, f"epoch_{epoch}")
+        os.makedirs(epoch_dir, exist_ok=True)
+        
+        for name, module in self.modules.items():
+            torch.save(module.state_dict(), os.path.join(epoch_dir, f"{name}.pt"))
+        
+        # Also update 'latest'
+        latest_dir = os.path.join(self.ckpt_dir, "latest")
+        if os.path.exists(latest_dir):
+            if os.path.islink(latest_dir): os.unlink(latest_dir)
+            else: shutil.rmtree(latest_dir)
+        
+        # Use a copy instead of symlink for better Kaggle/Windows compatibility
+        shutil.copytree(epoch_dir, latest_dir)
+
+        # Rotate: Keep only last 5
+        history_size = 5
+        all_epochs = sorted([
+            int(d.split('_')[1]) for d in os.listdir(self.ckpt_dir) 
+            if d.startswith("epoch_") and os.path.isdir(os.path.join(self.ckpt_dir, d))
+        ])
+        
+        if len(all_epochs) > history_size:
+            for old_epoch in all_epochs[:-history_size]:
+                old_dir = os.path.join(self.ckpt_dir, f"epoch_{old_epoch}")
+                shutil.rmtree(old_dir)
+
+    def _visualize_diagnostics(self, batch, epoch):
+        """Generates the 4-panel Stage 1 dashboard."""
+        encoder = self.modules.get("encoder")
+        decoder = self.modules.get("decoder")
+        if encoder is None or decoder is None: return
+
+        encoder.eval(); decoder.eval()
+        with torch.no_grad():
+            z_dict = self._encode(batch["state"])
+            recon_dict = decoder({**batch, **z_dict})
+            
+            # Sample first item in batch for visualization
+            orig = batch["state"][0, 0] # [H, W]
+            recon_logits = recon_dict.get("reconstructed_logits")
+            if recon_logits is not None:
+                recon = recon_logits[0].argmax(dim=0) # [H, W]
+            else:
+                # If using MSE decoder directly on pixels
+                recon = recon_dict["reconstruction"][0].view(orig.shape)
+            
+            save_path = f"evaluation_reports/plots/diag_epoch_{epoch}.png"
+            plot_reconstruction_dashboard(orig, recon, z_dict["latent"], epoch, save_path)
+            
+        encoder.train(); decoder.train()
 
     # ─── evaluation ─────────────────────────────────────────────────────────
     def evaluate(self, max_steps: int = 200) -> float:
