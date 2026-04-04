@@ -70,10 +70,10 @@ def main():
 
     # Apply profile overrides
     PROFILES = {
-        "base":    {"world_model": "TransformerWorldModel",    "num_layers": 4},
-        "deep32":  {"world_model": "TransformerWorldModel32",  "num_layers": 32},
-        "deep64":  {"world_model": "TransformerWorldModel64",  "num_layers": 64},
-        "deep128": {"world_model": "TransformerWorldModel128", "num_layers": 128},
+        "base":    {"world_model": "TransformerWorldModel",    "num_layers": 4,   "encoder": "CNNEncoder"},
+        "deep32":  {"world_model": "TransformerWorldModel32",  "num_layers": 32,  "encoder": "TransformerEncoder"},
+        "deep64":  {"world_model": "TransformerWorldModel64",  "num_layers": 64,  "encoder": "TransformerEncoder"},
+        "deep128": {"world_model": "TransformerWorldModel128", "num_layers": 128, "encoder": "TransformerEncoder"},
     }
     config.update(PROFILES[args.profile])
     if args.arc_data:
