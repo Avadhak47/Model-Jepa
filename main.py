@@ -56,7 +56,7 @@ def build_module(registry: dict, key: str, config: dict):
 # ─────────────────────────── CLI ────────────────────────────────────────────
 def parse_args():
     parser = argparse.ArgumentParser(description="NS-ARC Framework Driver")
-    parser.add_argument("--config", type=str, default="config.yaml", help="Path to YAML config")
+    parser.add_argument("--config", type=str, default="/kaggle/working/Model-Jepa/config.yaml", help="Path to YAML config")
     parser.add_argument("--mode", choices=["train", "eval", "validate", "debug", "comprehensive_eval"], default="train")
     parser.add_argument("--arc-data", type=str, default=None, help="Path to ARC JSON folder")
     parser.add_argument("--profile", choices=["base", "deep32", "deep64", "deep128"], default="base",
