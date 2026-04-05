@@ -86,10 +86,10 @@ for name, setup in MODELS_CONFIG.items():
 print("✅ Initiated Object-Centric Modules for all 3 Profiles.")
 
 # --- 5. Data & Tracking ---
-# Dummy dataset for setup/testing
+# Dummy dataset for setup/testing (Modified to produce realistic ARC 0-9 labels)
 class DummyDataset():
     def sample(self, bsize):
-        return {'state': torch.randn(bsize, 1, 30, 30)}
+        return {'state': torch.randint(0, 10, (bsize, 1, 30, 30))}
 dataset = DummyDataset()
 
 class RunTracker:

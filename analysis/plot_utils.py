@@ -32,8 +32,8 @@ def plot_reconstruction_dashboard(original, reconstructed, latent, epoch, save_p
     axes[0, 1].set_title("Pixel-wise Error Heatmap")
 
     # Panel 3: Color Histogram Comparison
-    target_counts = np.bincount(original.flatten().astype(int), minlength=10) / original.size
-    recon_counts = np.bincount(reconstructed.flatten().astype(int), minlength=10) / reconstructed.size
+    target_counts = np.bincount(np.clip(np.round(original.flatten()), 0, 9).astype(int), minlength=10) / original.size
+    recon_counts = np.bincount(np.clip(np.round(reconstructed.flatten()), 0, 9).astype(int), minlength=10) / reconstructed.size
     
     x = np.arange(10)
     axes[1, 0].bar(x - 0.2, target_counts, width=0.4, label='True', color='blue', alpha=0.6)
