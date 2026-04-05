@@ -125,3 +125,192 @@ class Decoder(BaseEncoder):
         target = target.view(target.shape[0], -1) 
         recon = outputs["reconstruction"]
         return {"loss": F.mse_loss(recon, target)}
+
+class SlotTransformerEncoder(BaseEncoder):
+    """
+    Object-Centric Encoder using Slot Attention.
+    Replaces global CLS reasoning with discrete structural extraction over K slots.
+    """
+    def __init__(self, config: dict):
+        super().__init__(config)
+        in_channels = config.get("in_channels", 1)
+        patch_size = config.get("patch_size", 14)
+        self.embed_dim = config.get("hidden_dim", 256)
+        self.latent_dim = config.get("latent_dim", 128)
+        self.num_slots = config.get("num_slots", 16)
+        self.slot_iters = config.get("slot_iters", 3)
+        
+        # Grid -> Patch Embeddings
+        self.patch_embed = nn.Conv2d(in_channels, self.embed_dim, kernel_size=patch_size, stride=patch_size)
+        
+        # Position embeddings for flat patches. Assuming 224x224 input -> 16x16 patches = 256. ARC grids are smaller, we'll make it dynamic or large enough
+        self.patch_pos_embed = nn.Parameter(torch.randn(1, 1024, self.embed_dim)) # Over-provisioned
+        
+        # Learned Slot Queries
+        self.slot_queries = nn.Parameter(torch.randn(1, self.num_slots, self.embed_dim))
+        
+        # Slot Attention Projections
+        self.norm_inputs = nn.LayerNorm(self.embed_dim)
+        self.norm_slots = nn.LayerNorm(self.embed_dim)
+        
+        self.q_proj = nn.Linear(self.embed_dim, self.embed_dim)
+        self.k_proj = nn.Linear(self.embed_dim, self.embed_dim)
+        self.v_proj = nn.Linear(self.embed_dim, self.embed_dim)
+        
+        self.gru = nn.GRUCell(self.embed_dim, self.embed_dim)
+        
+        # Relational Self-Attention between slots
+        self.relational_attn = nn.MultiheadAttention(self.embed_dim, num_heads=4, batch_first=True)
+        
+        # Projection to latent slot size
+        self.projector = nn.Sequential(
+            nn.LayerNorm(self.embed_dim),
+            nn.Linear(self.embed_dim, self.embed_dim),
+            nn.GELU(),
+            nn.Linear(self.embed_dim, self.latent_dim)
+        )
+        self.to(self.device)
+        
+    def forward(self, inputs: dict) -> dict:
+        img = inputs["state"].float().to(self.device)
+        if img.dim() == 3: img = img.unsqueeze(0)
+        
+        x = self.patch_embed(img) # [B, embed_dim, H', W']
+        B, C, H, W = x.shape
+        x = x.flatten(2).transpose(1, 2) # [B, N, embed_dim]
+        N = x.shape[1]
+        
+        # Add spatial position
+        x = x + self.patch_pos_embed[:, :N, :]
+        x = self.norm_inputs(x)
+        
+        # Keys and Values from grid patches
+        k = self.k_proj(x)
+        v = self.v_proj(x)
+        
+        # Initialize slots
+        slots = self.slot_queries.expand(B, -1, -1)
+        
+        # Iterative Slot Attention
+        for it in range(self.slot_iters):
+            slots_prev = slots
+            slots_norm = self.norm_slots(slots)
+            q = self.q_proj(slots_norm)
+            
+            # Dot-product attention: [B, slots, embed_dim] @ [B, embed_dim, N] -> [B, slots, N]
+            attn = torch.bmm(q, k.transpose(1, 2)) / (self.embed_dim ** 0.5)
+            
+            # --- THE ANTI-COLLAPSE SECRET ---
+            # Softmax over the SLOTS axis (dim=1). Competition for pixels.
+            # Temperature annealing could be added here for harder assignments.
+            attn = F.softmax(attn, dim=1) 
+            # --------------------------------
+            
+            # Normalize attention so each slot's total weight sums to 1
+            attn_norm = attn / (attn.sum(dim=-1, keepdim=True) + 1e-8)
+            
+            # Aggregate values
+            updates = torch.bmm(attn_norm, v)
+            
+            # Update slots via GRU
+            slots = self.gru(updates.reshape(-1, self.embed_dim), slots_prev.reshape(-1, self.embed_dim))
+            slots = slots.reshape(B, self.num_slots, self.embed_dim)
+            
+        # Relational Extraction (Slots talk to slots)
+        slots_rel, _ = self.relational_attn(slots, slots, slots)
+        slots = slots + slots_rel
+        
+        # Project to target latent dimensions
+        z = self.projector(slots) # [B, num_slots, latent_dim]
+        return {"latent": z}
+
+class SlotDecoder(BaseEncoder):
+    """
+    Decodes K independent slots into a single grid via Alpha-Mask Compositing.
+    Implements Gumbel-Softmax for discrete boundary extraction and Hinge Loss for diversity.
+    """
+    def __init__(self, config: dict):
+        super().__init__(config)
+        self.latent_dim = config.get("latent_dim", 128)
+        self.out_channels = config.get("out_channels", 1) # Support larger color palettes if needed, usually ARC is 1 channel of 10 classes or just flat RGB. Assuming 1 channel flat.
+        self.grid_size = config.get("grid_size", 30) # Default max size for ARC grids, can be dynamically broadcasted
+        self.num_slots = config.get("num_slots", 16)
+        
+        # Spatial Broadcast CNN
+        self.spatial_broadcast = nn.Sequential(
+            nn.ConvTranspose2d(self.latent_dim, 64, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 32, kernel_size=3, stride=1, padding=1),
+            nn.ReLU()
+        )
+        
+        # Color Map and Alpha Mask predictors
+        self.color_predictor = nn.Conv2d(32, self.out_channels, kernel_size=3, padding=1)
+        self.alpha_predictor = nn.Conv2d(32, 1, kernel_size=3, padding=1)
+        
+        self.to(self.device)
+
+    def forward(self, inputs: dict) -> dict:
+        z = inputs["latent"].to(self.device) # [B, num_slots, latent_dim]
+        B, num_slots, D = z.shape
+        
+        target_size = inputs["state"].shape[-2:] if "state" in inputs else (self.grid_size, self.grid_size)
+        H, W = target_size
+        
+        # Spatial Broadcast: Tile each slot vector across an HxW grid
+        z_flat = z.view(B * num_slots, D, 1, 1)
+        z_tiled = z_flat.expand(-1, -1, H, W) # [B*num_slots, D, H, W]
+        
+        # Decode components
+        decoded_features = self.spatial_broadcast(z_tiled)
+        
+        colors = self.color_predictor(decoded_features) # [B*num_slots, C, H, W]
+        alphas = self.alpha_predictor(decoded_features) # [B*num_slots, 1, H, W]
+        
+        # Reshape to slot dimension for competition
+        C = colors.shape[1]
+        colors = colors.view(B, num_slots, C, H, W)
+        alphas = alphas.view(B, num_slots, 1, H, W)
+        
+        # Gumbel-Softmax for hard 0/1 masks during forward, smooth gradients during backward
+        # Temperature could be annealed to 0.1 during training
+        alphas_normalized = F.gumbel_softmax(alphas, tau=0.5, hard=True, dim=1)
+        
+        # Composite final image
+        reconstruction = torch.sum(alphas_normalized * colors, dim=1) # [B, C, H, W]
+        
+        return {
+            "reconstruction": reconstruction,
+            "alphas": alphas_normalized, # Saved for visualization plotting
+            "colors": colors
+        }
+
+    def loss(self, inputs: dict, outputs: dict) -> dict:
+        target = inputs["state"].to(self.device).float()
+        if target.dim() == 3: target = target.unsqueeze(1)
+        recon = outputs["reconstruction"]
+        
+        mse_loss = F.mse_loss(recon, target)
+        
+        # Hinge-Based Similarity Penalty (Soft Orthogonality)
+        z = inputs["latent"] # [B, num_slots, latent_dim]
+        B, num_slots, _ = z.shape
+        
+        z_norm = F.normalize(z, dim=-1)
+        # Cosine similarity matrix [B, num_slots, num_slots]
+        sim_matrix = torch.bmm(z_norm, z_norm.transpose(1, 2))
+        
+        # Mask out self-similarity (diagonal)
+        mask = torch.eye(num_slots, device=self.device).unsqueeze(0).bool()
+        sim_matrix = sim_matrix.masked_fill(mask, -1.0)
+        
+        # Hinge penalty: penalize only if similarity > 0.95
+        hinge_loss = F.relu(sim_matrix - 0.95).mean()
+        
+        total_loss = mse_loss + 0.1 * hinge_loss
+        return {
+            "loss": total_loss, 
+            "mse_loss": mse_loss.detach(),
+            "hinge_loss": hinge_loss.detach()
+        }
+

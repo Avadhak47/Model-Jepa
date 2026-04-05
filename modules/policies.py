@@ -153,3 +153,101 @@ class DecisionTransformerPolicy(BasePolicy):
         targets = inputs["taken_actions"].to(self.device).long()  # [B]
         loss    = torch.nn.functional.cross_entropy(logits, targets)
         return {"loss": loss}
+
+class SlotPPOPolicy(BasePolicy):
+    """
+    PPO Policy that accepts [B, num_slots, latent_dim] Object-Centric states.
+    Uses Attention Pooling to aggregate objects into a unified decision vector.
+    """
+    def __init__(self, config: dict):
+        super().__init__(config)
+        self.latent_dim = config.get("latent_dim", 128)
+        self.action_dim = config.get("action_dim", 10)
+        self.continuous = config.get("continuous_actions", False)
+        
+        # Attention Pooling to compress [B, num_slots, latent_dim] -> [B, latent_dim]
+        self.pool_query = nn.Parameter(torch.randn(1, 1, self.latent_dim))
+        self.pool_attn = nn.MultiheadAttention(self.latent_dim, num_heads=4, batch_first=True)
+        
+        self.core = nn.Sequential(
+            nn.Linear(self.latent_dim, 256),
+            nn.Tanh(),
+            nn.Linear(256, 256),
+            nn.Tanh()
+        )
+        
+        self.actor_mean = nn.Linear(256, self.action_dim)
+        if self.continuous:
+            self.actor_logstd = nn.Parameter(torch.zeros(1, self.action_dim))
+            
+        self.critic = nn.Linear(256, 1)
+        self.to(self.device)
+
+    def forward(self, inputs: dict) -> dict:
+        z = inputs["latent"].to(self.device) # [B, num_slots, latent_dim]
+        B = z.shape[0]
+        
+        # Attention Pooling
+        q = self.pool_query.expand(B, -1, -1)
+        pooled_z, _ = self.pool_attn(q, z, z)
+        pooled_z = pooled_z.squeeze(1) # [B, latent_dim]
+        
+        features = self.core(pooled_z)
+        value = self.critic(features)
+        
+        if self.continuous:
+            action_mean = self.actor_mean(features)
+            action_logstd = self.actor_logstd.expand_as(action_mean)
+            action_std = torch.exp(action_logstd)
+            dist = Normal(action_mean, action_std)
+            action = dist.sample()
+            log_prob = dist.log_prob(action).sum(dim=-1)
+        else:
+            action_logits = self.actor_mean(features)
+            dist = Categorical(logits=action_logits)
+            action = dist.sample()
+            log_prob = dist.log_prob(action)
+            
+        entropy = dist.entropy().mean()
+        
+        return {
+            "action": action,
+            "log_prob": log_prob,
+            "value": value,
+            "entropy": entropy,
+            "action_dist": dist
+        }
+
+    def loss(self, inputs: dict, outputs: dict) -> dict:
+        """PPO Surrogate Clipping loss + Critic + Entropy bonus."""
+        old_log_probs = inputs["old_log_probs"].to(self.device)
+        advantages = inputs["advantages"].to(self.device)
+        returns = inputs["returns"].to(self.device)
+        
+        dist = outputs["action_dist"]
+        action = inputs["taken_actions"].to(self.device)
+        
+        if self.continuous:
+            curr_log_probs = dist.log_prob(action).sum(dim=-1)
+        else:
+            curr_log_probs = dist.log_prob(action)
+            
+        value = outputs["value"].squeeze(-1)
+        entropy = dist.entropy().mean()
+        
+        ratios = torch.exp(curr_log_probs - old_log_probs)
+        surr1 = ratios * advantages
+        surr2 = torch.clamp(ratios, 1.0 - 0.2, 1.0 + 0.2) * advantages
+        policy_loss = -torch.min(surr1, surr2).mean()
+        
+        value_loss = F.mse_loss(value, returns)
+        
+        ent_coef = self.config.get("ent_coef", 0.01)
+        loss = policy_loss + 0.5 * value_loss - ent_coef * entropy
+        
+        return {
+            "loss": loss,
+            "policy_loss": policy_loss.detach(),
+            "value_loss": value_loss.detach(),
+            "entropy": entropy.detach()
+        }

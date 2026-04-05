@@ -135,3 +135,63 @@ class EnsembleDisagreementCuriosity(BaseCuriosity):
 
     def loss(self, inputs: dict, outputs: dict) -> dict:
         return {"loss": outputs["ensemble_loss"]}
+
+class SlotRNDCuriosity(BaseCuriosity):
+    """
+    Object-Centric Random Network Distillation.
+    Computes novelty per-slot and averages it, encouraging exploration of novel abstract objects.
+    """
+    def __init__(self, config: dict):
+        super().__init__(config)
+        latent_dim = config.get("latent_dim", 128)
+        hidden     = 256
+        self.scale = config.get("curiosity_scale", 1.0)
+        
+        # Fixed random target evaluated on individual slots
+        self.target = nn.Sequential(
+            nn.Linear(latent_dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, hidden),
+        )
+        for p in self.target.parameters():
+            p.requires_grad = False
+            
+        # Learned predictor
+        self.predictor = nn.Sequential(
+            nn.Linear(latent_dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, hidden),
+        )
+        self.to(self.device)
+        
+    def forward(self, inputs: dict) -> dict:
+        z = inputs["latent"].to(self.device) # [B, num_slots, latent_dim]
+        B, S, D = z.shape
+        
+        # Flatten to [B*S, latent_dim]
+        z_flat = z.view(-1, D)
+        
+        with torch.no_grad():
+            t_feat = self.target(z_flat)
+            
+        p_feat = self.predictor(z_flat)
+        
+        # Error per object: [B*S]
+        err = F.mse_loss(p_feat, t_feat, reduction='none').mean(dim=-1)
+        
+        # Average object-novelties for final image novelty
+        err = err.view(B, S).mean(dim=1) # [B]
+        
+        intrinsic_reward = (err * self.scale).unsqueeze(-1) # [B, 1]
+        
+        return {
+            "intrinsic_reward": intrinsic_reward,
+            "rnd_loss": err.mean()
+        }
+        
+    def loss(self, inputs: dict, outputs: dict) -> dict:
+        return {"loss": outputs["rnd_loss"]}

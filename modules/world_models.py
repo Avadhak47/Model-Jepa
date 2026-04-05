@@ -248,3 +248,158 @@ class TransformerWorldModel128(TransformerWorldModel):
         config_override["num_layers"] = 128
         config_override["use_attn_res"] = True
         super().__init__(config_override)
+
+class SlotWorldModel(BaseWorldModel):
+    """
+    Spatio-Temporal Object-Centric World Model.
+    Processes [B, T, num_slots, latent_dim] to predict object configurations forward in time.
+    Maintains distinct object representations (slots).
+    """
+    def __init__(self, config: dict):
+        super().__init__(config)
+        self.latent_dim = config.get("latent_dim", 128)
+        self.action_dim = config.get("action_dim", 32)
+        self.embed_dim = config.get("hidden_dim", 256)
+        self.num_layers = config.get("num_layers", 4)
+        self.nhead = config.get("nhead", 8)
+        self.num_slots = config.get("num_slots", 16)
+        
+        self.state_embed = nn.Linear(self.latent_dim, self.embed_dim)
+        
+        # Spatial Attention: Objects interacting at a single time step
+        self.spatial_attn_layers = nn.ModuleList([
+            nn.MultiheadAttention(self.embed_dim, self.nhead, batch_first=True) for _ in range(self.num_layers)
+        ])
+        
+        # Temporal Attention: A single object interacting with its past self
+        self.temporal_attn_layers = nn.ModuleList([
+            nn.MultiheadAttention(self.embed_dim, self.nhead, batch_first=True) for _ in range(self.num_layers)
+        ])
+        
+        self.ffn_layers = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(self.embed_dim, self.embed_dim * 4),
+                nn.GELU(),
+                nn.Linear(self.embed_dim * 4, self.embed_dim)
+            ) for _ in range(self.num_layers)
+        ])
+        
+        # Action injection via AdaLN
+        self.adaln = nn.ModuleList([AdaLN(self.embed_dim, self.action_dim) for _ in range(self.num_layers)])
+        
+        # Output Heads
+        self.next_state_head = nn.Linear(self.embed_dim, self.latent_dim)
+        
+        # For reward, we pool slots into a global representation first
+        self.reward_pool = nn.Sequential(
+            nn.Linear(self.embed_dim, self.embed_dim),
+            nn.GELU()
+        )
+        self.reward_head = nn.Linear(self.embed_dim, 1)
+        
+        self.to(self.device)
+
+    def forward(self, inputs: dict) -> dict:
+        z_seq = inputs["latent"].to(self.device) # [B, T, num_slots, latent_dim]
+        a_seq = inputs["action"].to(self.device)
+        
+        if z_seq.dim() == 3: # Missing Time dimension
+            z_seq = z_seq.unsqueeze(1)
+            a_seq = a_seq.unsqueeze(1)
+            
+        B, T, S, D = z_seq.shape
+        x = self.state_embed(z_seq) # [B, T, S, embed_dim]
+        
+        a_flat = a_seq[:, 0, :] if a_seq.dim() == 3 else a_seq 
+        
+        # Temporal causal mask
+        temporal_mask = torch.triu(torch.ones(T, T) * float('-inf'), diagonal=1).to(self.device)
+        self.attention_entropies = []
+        
+        for i in range(self.num_layers):
+            # 1. Spatial Processing (Slot vs Slot) at each timestep
+            # Reshape to [B*T, S, embed_dim]
+            x_s = x.view(B * T, S, self.embed_dim)
+            spatial_out, _ = self.spatial_attn_layers[i](x_s, x_s, x_s)
+            x = x + spatial_out.view(B, T, S, self.embed_dim)
+            
+            # 2. Temporal Processing (Time vs Time) for each slot
+            # Reshape to [B*S, T, embed_dim]
+            x_t = x.transpose(1, 2).reshape(B * S, T, self.embed_dim)
+            temporal_out, t_weights = self.temporal_attn_layers[i](x_t, x_t, x_t, attn_mask=temporal_mask, average_attn_weights=True)
+            
+            # Entropy metric
+            ent = -torch.sum(t_weights * torch.log(t_weights + 1e-8), dim=-1).mean()
+            self.attention_entropies.append(ent)
+            
+            x = x + temporal_out.view(B, S, T, self.embed_dim).transpose(1, 2)
+            
+            # 3. Action Injection & FFN
+            x_flat = x.view(B*T*S, self.embed_dim)
+            a_expanded = a_flat.unsqueeze(1).unsqueeze(2).expand(B, T, S, -1).reshape(B*T*S, -1)
+            
+            x_norm = self.adaln[i](x_flat, a_expanded)
+            x_ffn = self.ffn_layers[i](x_norm)
+            
+            x = x + x_ffn.view(B, T, S, self.embed_dim)
+            
+        # Predict next states [B, T, S, latent_dim]
+        next_z = self.next_state_head(x)
+        
+        # Predict rewards (Pool across slots by taking max or mean, then linear)
+        # Using Max Pool over slots for reward features helps capture "Did any object reach goal?"
+        pooled_feat, _ = torch.max(self.reward_pool(x), dim=2) # [B, T, embed_dim]
+        reward = self.reward_head(pooled_feat) # [B, T, 1]
+        
+        return {
+            "next_latent": next_z, 
+            "predicted_reward": reward,
+            "attention_entropy": sum(self.attention_entropies) / len(self.attention_entropies)
+        }
+        
+    def loss(self, inputs: dict, outputs: dict) -> dict:
+        target_z = inputs["target_latent"].to(self.device) # [B, S, latent_dim]
+        target_r = inputs["target_reward"].to(self.device).squeeze()
+        
+        pred_z = outputs["next_latent"]
+        pred_r = outputs["predicted_reward"]
+        
+        if pred_z.dim() > target_z.dim():
+            pred_z = pred_z.squeeze(1)
+        if pred_r.dim() > target_r.dim():
+            pred_r = pred_r.squeeze(-1)
+            
+        z_loss = F.mse_loss(pred_z, target_z)
+        r_loss = F.mse_loss(pred_r, target_r)
+        
+        # SIGReg across the temporal/batch axis to maintain slot variances
+        std_z = torch.sqrt(pred_z.view(-1, self.latent_dim).var(dim=0) + 1e-4).mean()
+        sigreg_loss = F.relu(1.0 - std_z)
+        
+        total_loss = z_loss + r_loss + 0.1 * sigreg_loss
+        
+        return {
+            "loss": total_loss, 
+            "z_loss": z_loss.detach(),
+            "r_loss": r_loss.detach(),
+            "sigreg_loss": sigreg_loss.detach(),
+            "attention_entropy": outputs["attention_entropy"].detach()
+        }
+
+class SlotWorldModel32(SlotWorldModel):
+    def __init__(self, config: dict):
+        cfg = config.copy()
+        cfg["num_layers"] = 32
+        super().__init__(cfg)
+
+class SlotWorldModel64(SlotWorldModel):
+    def __init__(self, config: dict):
+        cfg = config.copy()
+        cfg["num_layers"] = 64
+        super().__init__(cfg)
+
+class SlotWorldModel128(SlotWorldModel):
+    def __init__(self, config: dict):
+        cfg = config.copy()
+        cfg["num_layers"] = 128
+        super().__init__(cfg)
