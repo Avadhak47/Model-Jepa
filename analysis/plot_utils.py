@@ -17,6 +17,9 @@ def plot_reconstruction_dashboard(original, reconstructed, latent, epoch, save_p
     reconstructed = reconstructed.cpu().numpy()
     latent = latent.cpu().detach().numpy()
     
+    if latent.ndim == 1:
+        latent = latent[np.newaxis, :]
+    
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     fig.suptitle(f"Phase 1 Diagnostic Dashboard - Epoch {epoch}", fontsize=16)
 
