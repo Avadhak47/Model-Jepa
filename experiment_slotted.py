@@ -21,9 +21,16 @@ import shutil
 KAGGLE_REPO_PATH = '/kaggle/working/Model-Jepa'
 if os.path.exists(KAGGLE_REPO_PATH):
     print("✅ Kaggle Repository Structure Detected.")
+    run(f"cd {KAGGLE_REPO_PATH} && git pull origin main || true")
     if KAGGLE_REPO_PATH not in sys.path:
         sys.path.insert(0, KAGGLE_REPO_PATH)
         print(f"✅ Added {KAGGLE_REPO_PATH} to sys.path")
+    
+    # FORCE RELOAD affected modules
+    import importlib
+    import analysis.plot_utils
+    importlib.reload(analysis.plot_utils)
+    print("✅ Reloaded analysis.plot_utils")
 else:
     sys.path.insert(0, os.path.abspath('.'))
 
