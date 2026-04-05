@@ -133,7 +133,7 @@ def train_slotted_phase(phase, modules, cfg, tracker, current_step, wb_run, n_ba
                 recon = recon_out['reconstruction'][0].squeeze(0) # [H, W]
                 os.makedirs("evaluation_reports/plots", exist_ok=True)
                 viz_path = f"evaluation_reports/plots/slot_diag_{model_name}_ep_{epoch}.png"
-                plot_reconstruction_dashboard(orig, recon, z_dict['latent'][0].mean(dim=0), epoch, viz_path)
+                plot_reconstruction_dashboard(orig, recon, z_dict['latent'][0], epoch, viz_path)
                 
                 if wb_run:
                     wb_run.log({f"diagnostics/{phase}_slots": wandb.Image(viz_path)}, step=current_step)
