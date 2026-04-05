@@ -203,6 +203,9 @@ class TransformerWorldModel(BaseWorldModel):
         target_z = inputs["target_latent"].to(self.device)
         target_r = inputs["target_reward"].to(self.device)
         
+        pred_z = outputs["next_latent"]
+        pred_r = outputs["predicted_reward"]
+        
         # Ensure shapes match to prevent broadcasting warnings
         if pred_z.dim() > target_z.dim():
             pred_z = pred_z.squeeze(1)
