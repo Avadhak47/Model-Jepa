@@ -71,7 +71,12 @@ class TransformerDecoder(BaseTrainableModule):
         target_one_hot = nn.functional.one_hot(target, num_classes=self.vocab_size).float()
         target_hist = target_one_hot.mean(dim=(1, 2)) # [B, 10]
         
-        color_ebc_loss = nn.functional.mse_loss(pred_hist, target_hist)
+        # Use KL-Div instead of MSE to properly penalize rare colors
+        color_ebc_loss = nn.functional.kl_div(
+            torch.log(pred_hist + 1e-8), 
+            target_hist, 
+            reduction='batchmean'
+        )
         
         total_loss = recon_loss + (0.5 * color_ebc_loss)
         
