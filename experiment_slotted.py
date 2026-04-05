@@ -48,6 +48,7 @@ from modules.encoders import SlotTransformerEncoder, SlotDecoder
 from modules.world_models import SlotWorldModel32, SlotWorldModel64, SlotWorldModel128
 from modules.policies import SlotPPOPolicy
 from modules.curiosity import SlotRNDCuriosity
+from arc_data.rearc_dataset import ReARCDataset
 
 MODELS_CONFIG = {
     'Slotted-NSARC-32':  {'world_model': SlotWorldModel32, 'encoder_layers': 4},
@@ -86,11 +87,9 @@ for name, setup in MODELS_CONFIG.items():
 print("✅ Initiated Object-Centric Modules for all 3 Profiles.")
 
 # --- 5. Data & Tracking ---
-# Dummy dataset for setup/testing (Modified to produce realistic ARC 0-9 labels)
-class DummyDataset():
-    def sample(self, bsize):
-        return {'state': torch.randint(0, 10, (bsize, 1, 30, 30))}
-dataset = DummyDataset()
+# Real ReARCDataset integration
+REARC_PATH = '/kaggle/working/Model-Jepa/arc_data/re-arc' if os.path.exists('/kaggle/working/Model-Jepa') else 'arc_data/re-arc'
+dataset = ReARCDataset(data_path=REARC_PATH)
 
 class RunTracker:
     def __init__(self):
@@ -150,8 +149,14 @@ def train_slotted_phase(phase, modules, cfg, tracker, current_step, wb_run, n_ba
             z_start = modules['encoder']({'state': states})['latent'].detach() # [B, S, D]
             action = torch.randn(batch_size, cfg['action_dim'], device=cfg['device']) 
             out = modules['world_model']({'latent': z_start, 'action': action})
+            
+            # Encode true next state to get target latent for MSE comparison
+            with torch.no_grad():
+                target_states = batch['target_state'].to(cfg['device'])
+                target_z = modules['encoder']({'state': target_states})['latent']
+            
             loss_dict = modules['world_model'].loss(
-                {'target_latent': torch.randn_like(out['next_latent']), 'target_reward': torch.zeros(batch_size, device=cfg['device'])}, 
+                {'target_latent': target_z, 'target_reward': batch['target_reward'].to(cfg['device'])}, 
                 out
             )
         else: # Unrunnable dummy
