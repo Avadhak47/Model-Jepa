@@ -132,7 +132,8 @@ class TransformerWorldModel(BaseWorldModel):
         self.nhead = config.get("nhead", 8)
         self.use_attn_res = config.get("use_attn_res", False)
         
-        self.state_embed = nn.Linear(self.latent_dim, self.embed_dim)
+        # Explicit Action Concatenation: Forces the network to use the action 
+        self.state_embed = nn.Linear(self.latent_dim + self.action_dim, self.embed_dim)
         
         self.attn_layers = nn.ModuleList([
             nn.MultiheadAttention(self.embed_dim, self.nhead, batch_first=True) for _ in range(self.num_layers)
@@ -164,7 +165,10 @@ class TransformerWorldModel(BaseWorldModel):
             a_seq = a_seq.unsqueeze(1)
             
         B, T, _ = z_seq.shape
-        x = self.state_embed(z_seq)
+        
+        # Dense Action Coupling: Concatenate to prevent the model from ignoring actions
+        za_cat = torch.cat([z_seq, a_seq], dim=-1)
+        x = self.state_embed(za_cat)
         
         # Ensure action is [B, action_dim] — AdaLN injects per-sequence-step
         a_flat = a_seq[:, 0, :] if a_seq.dim() == 3 else a_seq  # take first action or use directly
@@ -215,16 +219,30 @@ class TransformerWorldModel(BaseWorldModel):
         z_loss = F.mse_loss(pred_z, target_z)
         r_loss = F.mse_loss(pred_r, target_r)
         
-        std_z = torch.sqrt(pred_z.var(dim=0) + 1e-4).mean()
-        sigreg_loss = F.relu(1.0 - std_z)
+        # Flatten time and batch dimensions for variance/covariance
+        pred_z_flat = pred_z.view(-1, pred_z.size(-1))
         
-        total_loss = z_loss + r_loss + 0.1 * sigreg_loss
+        # 1. Variance Loss (Prevent Mean Collapse)
+        std_z = torch.sqrt(pred_z_flat.var(dim=0) + 1e-4)
+        sigreg_loss = F.relu(1.0 - std_z).mean()
+        
+        # 2. Covariance Loss (VICReg) - Prevent Dimensional Collapse
+        B_sz = pred_z_flat.size(0)
+        if B_sz > 1:
+            z_centered = pred_z_flat - pred_z_flat.mean(dim=0)
+            cov_z = (z_centered.T @ z_centered) / (B_sz - 1.0)
+            cov_loss = (cov_z.fill_diagonal_(0.0) ** 2).sum() / max(1, pred_z_flat.size(1))
+        else:
+            cov_loss = torch.tensor(0.0, device=self.device)
+        
+        total_loss = z_loss + r_loss + 0.1 * sigreg_loss + 0.01 * cov_loss
         
         return {
             "loss": total_loss, 
             "z_loss": z_loss.detach(),
             "r_loss": r_loss.detach(),
             "sigreg_loss": sigreg_loss.detach(),
+            "cov_loss": cov_loss.detach(),
             "attention_entropy": outputs["attention_entropy"].detach()
         }
 
