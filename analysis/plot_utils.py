@@ -57,3 +57,48 @@ def plot_reconstruction_dashboard(original, reconstructed, latent, epoch, save_p
     plt.savefig(save_path)
     plt.close(fig)
     return save_path
+
+def plot_world_model_predictions(orig_grid, true_next_grid, predicted_next_grid, action_text, epoch, save_path):
+    """
+    3-panel diagnostic dashboard for the World Model.
+    Visualizes Input Grid -> [Action] -> Predicted Grid vs True Grid
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    # Ensure numpy arrays
+    if hasattr(orig_grid, 'cpu'): orig_grid = orig_grid.cpu().numpy()
+    if hasattr(true_next_grid, 'cpu'): true_next_grid = true_next_grid.cpu().numpy()
+    if hasattr(predicted_next_grid, 'cpu'): predicted_next_grid = predicted_next_grid.cpu().numpy()
+
+    # Squeeze out single dimensions
+    orig_grid = np.squeeze(orig_grid)
+    true_next_grid = np.squeeze(true_next_grid)
+    predicted_next_grid = np.squeeze(predicted_next_grid)
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    fig.suptitle(f"Phase 2 Diagnostic: World Model Predictions - Epoch {epoch}", fontsize=16)
+
+    # Panel 1: Original State
+    axes[0].imshow(orig_grid, cmap='tab10', vmin=0, vmax=9)
+    axes[0].set_title(f"State $T$\nAction taken: {action_text}", fontsize=12)
+    axes[0].axis('off')
+
+    # Panel 2: Predicted Next State (Decoded from Latent)
+    axes[1].imshow(predicted_next_grid, cmap='tab10', vmin=0, vmax=9)
+    axes[1].set_title(f"Predicted State $T+1$\n(Model Hallucination)", fontsize=12)
+    axes[1].axis('off')
+
+    # Panel 3: True Next State
+    axes[2].imshow(true_next_grid, cmap='tab10', vmin=0, vmax=9)
+    axes[2].set_title(f"Ground Truth State $T+1$\n(Actual Physics)", fontsize=12)
+    axes[2].axis('off')
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    
+    # Save safely
+    import os
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path)
+    plt.close(fig)
+    return save_path

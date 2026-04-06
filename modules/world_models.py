@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from modules.interfaces import BaseWorldModel
+from scipy.optimize import linear_sum_assignment
 
 class MLPDynamicsModel(BaseWorldModel):
     """Simple continuous dynamics model."""
@@ -390,7 +391,24 @@ class SlotWorldModel(BaseWorldModel):
         if pred_r.dim() > target_r.dim():
             pred_r = pred_r.squeeze(-1)
             
-        z_loss = F.mse_loss(pred_z, target_z)
+        # 🚨 Hungarian Matching (Bipartite Graph Alignment)
+        # We must align permutation-invariant slots before calculating MSE
+        B, S, D = pred_z.shape
+        aligned_target_z = torch.zeros_like(target_z)
+        
+        with torch.no_grad():
+            for b in range(B):
+                # Calculate cost matrix via Euclidean distance between 16 predicted slots and 16 target slots
+                cost_matrix = torch.cdist(pred_z[b].unsqueeze(0), target_z[b].unsqueeze(0)).squeeze(0)
+                cost_np = cost_matrix.cpu().numpy()
+                
+                # SciPy solves the optimal assignment in <0.1ms
+                row_ind, col_ind = linear_sum_assignment(cost_np)
+                
+                # Reorder the targets to match the predictions
+                aligned_target_z[b] = target_z[b][col_ind]
+            
+        z_loss = F.mse_loss(pred_z, aligned_target_z)
         r_loss = F.mse_loss(pred_r, target_r)
         
         # SIGReg across the temporal/batch axis to maintain slot variances

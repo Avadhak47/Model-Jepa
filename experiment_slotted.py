@@ -109,13 +109,16 @@ class RunTracker:
             self.history[key].append((step, v.item() if hasattr(v, 'item') else v))
     def get(self, key):
         return [v for _, v in self.history.get(key, [])]
+    def steps(self, key):
+        return [s for s, _ in self.history.get(key, [])]
 
 TRACKERS = {m: RunTracker() for m in MODELS.keys()}
+COLORS = {'Slotted-NSARC-32': '#4C9BE8', 'Slotted-NSARC-64': '#E85D4A', 'Slotted-NSARC-128': '#5CB85C'}
 SAVE_DIR = pathlib.Path('./checkpoints')
 SAVE_DIR.mkdir(exist_ok=True)
 
 # --- 6. Slotted Training Utilities ---
-from analysis.plot_utils import plot_reconstruction_dashboard
+from analysis.plot_utils import plot_reconstruction_dashboard, plot_world_model_predictions
 
 def train_slotted_phase(phase, modules, cfg, tracker, current_step, wb_run, n_batches, batch_size, model_name="base", epoch=0):
     if phase == 'ae':
@@ -145,6 +148,37 @@ def train_slotted_phase(phase, modules, cfg, tracker, current_step, wb_run, n_ba
                 if wb_run:
                     wb_run.log({f"diagnostics/{phase}_slots": wandb.Image(viz_path)}, step=current_step)
             modules['encoder'].train(); modules['decoder'].train()
+            
+        elif phase == 'wm' and epoch % 5 == 0 and b == 0:
+            modules['world_model'].eval(); modules['decoder'].eval(); modules['encoder'].eval()
+            with torch.no_grad():
+                z_start = modules['encoder']({'state': states})['latent']
+                action = torch.randn(batch_size, cfg['action_dim'], device=cfg['device']) 
+                wm_out = modules['world_model']({'latent': z_start, 'action': action})
+                
+                # Predict next latent
+                pred_z = wm_out['next_latent']
+                if pred_z.dim() == 4: pred_z = pred_z.squeeze(1)
+                
+                # Decode the hallucinated latent into an imagined state
+                # Note: SlotDecoder expects [B, S, D] which pred_z is!
+                imagined_out = modules['decoder']({'latent': pred_z, 'state': states})
+                
+                orig_grid = states[0, 0]
+                true_next_grid = batch['target_state'][0, 0].to(cfg['device'])
+                predicted_next_grid = imagined_out['reconstruction'][0].squeeze(0)
+                
+                os.makedirs("evaluation_reports/plots", exist_ok=True)
+                viz_path = f"evaluation_reports/plots/wm_diag_{model_name}_ep_{epoch}.png"
+                
+                plot_world_model_predictions(
+                    orig_grid, true_next_grid, predicted_next_grid, 
+                    action_text="Random Transition", epoch=epoch, save_path=viz_path
+                )
+                
+                if wb_run:
+                    wb_run.log({f"diagnostics/{phase}_dreams": wandb.Image(viz_path)}, step=current_step)
+            modules['world_model'].train(); modules['decoder'].train(); modules['encoder'].train()
         # ---------------------------
 
         if phase == 'ae':
