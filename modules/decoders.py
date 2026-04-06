@@ -64,12 +64,17 @@ class TransformerDecoder(BaseTrainableModule):
         
         # --- RiJEPA Energy-Based Constraints (EBC) ---
         # 1. Color Invariance (Pixel distribution should roughly match)
-        # We enforce that the predicted color histogram matches the target histogram
         pred_probs = torch.softmax(logits, dim=1)  # [B, 10, 30, 30]
-        pred_hist = pred_probs.mean(dim=(2, 3))    # [B, 10]
         
         target_one_hot = nn.functional.one_hot(target, num_classes=self.vocab_size).float()
-        target_hist = target_one_hot.mean(dim=(1, 2)) # [B, 10]
+        
+        # 🚨 Ignore Background/Padding (Color 0) to prevent it from dominating the loss
+        pred_hist = pred_probs[:, 1:].mean(dim=(2, 3))    # [B, 9]
+        target_hist = target_one_hot[:, :, :, 1:].mean(dim=(1, 2)) # [B, 9]
+        
+        # Re-normalize to create valid probability distributions
+        pred_hist = pred_hist / (pred_hist.sum(dim=-1, keepdim=True) + 1e-8)
+        target_hist = target_hist / (target_hist.sum(dim=-1, keepdim=True) + 1e-8)
         
         # Use KL-Div instead of MSE to properly penalize rare colors
         color_ebc_loss = nn.functional.kl_div(
