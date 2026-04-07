@@ -232,7 +232,7 @@ class SlotDecoder(BaseEncoder):
     def __init__(self, config: dict):
         super().__init__(config)
         self.latent_dim = config.get("latent_dim", 128)
-        self.out_channels = config.get("out_channels", 1) # Support larger color palettes if needed, usually ARC is 1 channel of 10 classes or just flat RGB. Assuming 1 channel flat.
+        self.vocab_size = config.get("vocab_size", 10) # 10 ARC Colors
         self.grid_size = config.get("grid_size", 30) # Default max size for ARC grids, can be dynamically broadcasted
         self.num_slots = config.get("num_slots", 16)
         
@@ -244,8 +244,8 @@ class SlotDecoder(BaseEncoder):
             nn.ReLU()
         )
         
-        # Color Map and Alpha Mask predictors
-        self.color_predictor = nn.Conv2d(32, self.out_channels, kernel_size=3, padding=1)
+        # Color Map (Logits) and Alpha Mask predictors
+        self.color_predictor = nn.Conv2d(32, self.vocab_size, kernel_size=3, padding=1)
         self.alpha_predictor = nn.Conv2d(32, 1, kernel_size=3, padding=1)
         
         self.to(self.device)
@@ -286,11 +286,20 @@ class SlotDecoder(BaseEncoder):
         }
 
     def loss(self, inputs: dict, outputs: dict) -> dict:
-        target = inputs["state"].to(self.device).float()
-        if target.dim() == 3: target = target.unsqueeze(1)
-        recon = outputs["reconstruction"]
+        target = inputs["state"].to(self.device).long()
+        if target.dim() == 4 and target.size(1) == 1: 
+            target = target.squeeze(1) # [B, H, W]
+        recon_logits = outputs["reconstruction"] # [B, 10, H, W]
         
-        mse_loss = F.mse_loss(recon, target)
+        # Focal Loss across discrete color categories, replacing broken contiguous MSE
+        ce_loss = F.cross_entropy(recon_logits, target, reduction='none')
+        gamma = self.config.get('focal_gamma', 2.0)
+        
+        if gamma > 0:
+            pt = torch.exp(-ce_loss)
+            recon_loss = (((1 - pt) ** gamma) * ce_loss).mean()
+        else:
+            recon_loss = ce_loss.mean()
         
         # Hinge-Based Similarity Penalty (Soft Orthogonality)
         z = inputs["latent"] # [B, num_slots, latent_dim]
@@ -304,13 +313,17 @@ class SlotDecoder(BaseEncoder):
         mask = torch.eye(num_slots, device=self.device).unsqueeze(0).bool()
         sim_matrix = sim_matrix.masked_fill(mask, -1.0)
         
-        # Hinge penalty: penalize only if similarity > 0.95
-        hinge_loss = F.relu(sim_matrix - 0.95).mean()
+        # Hinge penalty: we dynamically relax the competitive constraint
+        # as accuracy increases. 
+        # Extremely Strict at start (min_t), more relaxed at end (max_t).
+        t = inputs.get("hinge_threshold", 0.95)
+        hinge_loss = F.relu(sim_matrix - t).mean()
         
-        total_loss = mse_loss + 0.1 * hinge_loss
+        # Slot Regularization: Prevent slot decay
+        total_loss = recon_loss + 0.1 * hinge_loss
         return {
             "loss": total_loss, 
-            "mse_loss": mse_loss.detach(),
-            "hinge_loss": hinge_loss.detach()
+            "recon_loss": recon_loss.detach(),
+            "hinge_loss": hinge_loss.detach(),
+            "hinge_threshold": float(t)
         }
-

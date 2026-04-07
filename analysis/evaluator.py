@@ -114,3 +114,12 @@ def plot_loss_curves(train_history, val_history, phase_name, save_path="evaluati
     plt.close()
     
     return save_path
+
+def get_dynamic_threshold(accuracy, min_t=0.5, max_t=0.98):
+    """
+    Computes a Hinge threshold that scales linearly with accuracy.
+    Start at min_t (strict), end at max_t (relaxed).
+    """
+    # Clamp accuracy between 0 and 1
+    a = max(0, min(1, accuracy))
+    return min_t + (a * (max_t - min_t))
