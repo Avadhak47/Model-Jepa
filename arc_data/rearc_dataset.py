@@ -74,10 +74,30 @@ class ReARCDataset:
               f"from {len(task_files)} tasks in '{path}'")
 
     def _use_mock(self, n: int = 2000):
+        """Generates procedural geometric blocks rather than TV static so Slot Attention can actually learn objects."""
         rng = np.random.default_rng(42)
         for _ in range(n):
-            inp = rng.integers(0, 10, (self.MAX_GRID, self.MAX_GRID)).astype(np.float32)
-            out = rng.integers(0, 10, (self.MAX_GRID, self.MAX_GRID)).astype(np.float32)
+            inp = np.zeros((self.MAX_GRID, self.MAX_GRID), dtype=np.float32)
+            out = np.zeros((self.MAX_GRID, self.MAX_GRID), dtype=np.float32)
+            
+            # Add 2-6 distinct semantic objects
+            for _ in range(rng.integers(2, 7)):
+                color = rng.integers(1, 10)
+                obj_type = rng.integers(0, 3)
+                r, c = rng.integers(0, self.MAX_GRID-1, size=2)
+                
+                if obj_type == 0: # 1x1 Dot (stress-tests focal loss)
+                    inp[r, c] = color
+                    out[r, c] = color
+                elif obj_type == 1: # Horizontal Line
+                    w = rng.integers(3, 10)
+                    inp[r:min(r+w, self.MAX_GRID), c] = color
+                    out[r:min(r+w, self.MAX_GRID), c] = color
+                elif obj_type == 2: # Solid Rectangle
+                    w, h = rng.integers(3, 8, size=2)
+                    inp[r:min(r+w, self.MAX_GRID), c:min(c+h, self.MAX_GRID)] = color
+                    out[r:min(r+w, self.MAX_GRID), c:min(c+h, self.MAX_GRID)] = color
+
             self.pairs.append((inp, out))
 
     def __len__(self):
