@@ -43,7 +43,9 @@ def run_validation_epoch(modules: dict, dataset, phase: str, batch_size=32, devi
                 # Track pixel-level accuracy
                 acc = check_accuracy(out['reconstruction'], states)
                 
-                val_losses.append(loss_dict['recon_loss'].item())
+                # Robustly fetch loss: fallback to 'loss' if specific sub-losses are missing
+                l_val = loss_dict.get('recon_loss', loss_dict.get('mse_loss', loss_dict['loss']))
+                val_losses.append(l_val.item() if hasattr(l_val, 'item') else float(l_val))
                 val_accs.append(acc)
                 
             elif phase == 'wm':
@@ -67,7 +69,8 @@ def run_validation_epoch(modules: dict, dataset, phase: str, batch_size=32, devi
                 )
                 
                 # Accuracy is undefined for pure latent regression
-                val_losses.append(loss_dict['z_loss'].item())
+                l_val = loss_dict.get('z_loss', loss_dict.get('loss', 0.0))
+                val_losses.append(l_val.item() if hasattr(l_val, 'item') else float(l_val))
                 val_accs.append(0.0) 
                 
     # Phase 2: Unfreeze architecture and return to training
