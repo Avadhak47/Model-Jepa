@@ -23,7 +23,7 @@ class ReARCDataset:
 
     MAX_GRID = 30
 
-    def __init__(self, data_path: str, max_pairs_per_task: int = 100):
+    def __init__(self, data_path: str, max_pairs_per_task: int = 100, validation_split: float = 0.1):
         self.data_path = pathlib.Path(data_path)
         self.max_pairs = max_pairs_per_task
         self.pairs: list[tuple] = []   # list of (input_grid, output_grid) numpy arrays
@@ -34,6 +34,14 @@ class ReARCDataset:
             print(f"Warning: ReARC path '{data_path}' not found. "
                   "Using random mock data. Clone re-arc and point ARC_DATA_PATH there.")
             self._use_mock()
+            
+        # Shuffle and split
+        random.seed(42) # Deterministic split
+        random.shuffle(self.pairs)
+        val_size = int(len(self.pairs) * validation_split)
+        self.val_pairs = self.pairs[:val_size]
+        self.train_pairs = self.pairs[val_size:]
+        print(f"Dataset Split | Train: {len(self.train_pairs)} pairs | Val: {len(self.val_pairs)} pairs")
 
     def _pad(self, grid: list) -> np.ndarray:
         """Pad a 2D list grid to MAX_GRID×MAX_GRID."""
@@ -75,10 +83,13 @@ class ReARCDataset:
     def __len__(self):
         return len(self.pairs)
 
-    def sample(self, batch_size: int) -> dict:
+    def sample(self, batch_size: int, split: str = 'train') -> dict:
         """Return a TensorDict batch compatible with all NS-ARC modules."""
-        batch_size = min(batch_size, len(self.pairs))
-        chosen = random.sample(self.pairs, batch_size)
+        pool = self.val_pairs if split == 'val' else self.train_pairs
+        if not pool: pool = self.pairs # Fallback if split fails bounds
+        
+        batch_size = min(batch_size, len(pool))
+        chosen = random.sample(pool, batch_size)
 
         states  = np.stack([p[0] for p in chosen])   # [B, H, W]
         targets = np.stack([p[1] for p in chosen])
