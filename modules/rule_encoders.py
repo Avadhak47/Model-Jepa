@@ -10,8 +10,8 @@ class RuleEncoder(nn.Module):
         super().__init__()
         self.latent_dim = config.get("latent_dim", 128)
         
-        # Properties from ReARCDataset: type (0-2), color (1-10), r, c, w, h
-        self.type_embed = nn.Embedding(5, 32)
+        # Properties from ReARCDataset: type (0-10), color (1-15)
+        self.type_embed = nn.Embedding(10, 32)
         self.color_embed = nn.Embedding(15, 32)
         
         self.geom_map = nn.Linear(4, 32)

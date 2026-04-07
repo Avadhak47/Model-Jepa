@@ -148,7 +148,7 @@ class SlotTransformerEncoder(BaseEncoder):
         
         # Learned Slot Prior Distributions (Stochastic Initialization)
         self.slots_mu = nn.Parameter(torch.randn(1, 1, self.embed_dim))
-        self.slots_logsigma = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
+        self.slots_logsigma = nn.Parameter(torch.ones(1, 1, self.embed_dim) * -3.0)
         
         # Slot Attention Projections
         self.norm_inputs = nn.LayerNorm(self.embed_dim)
@@ -192,7 +192,10 @@ class SlotTransformerEncoder(BaseEncoder):
         # Initialize slots stochastically to break symmetry
         mu = self.slots_mu.expand(B, self.num_slots, -1)
         sigma = self.slots_logsigma.exp().expand(B, self.num_slots, -1)
-        slots = mu + sigma * torch.randn_like(mu)
+        if self.training:
+            slots = mu + sigma * torch.randn_like(mu)
+        else:
+            slots = mu
         
         # Iterative Slot Attention
         for it in range(self.slot_iters):
