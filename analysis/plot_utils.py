@@ -13,12 +13,19 @@ def plot_reconstruction_dashboard(original, reconstructed, latent, epoch, save_p
     3. Color Histogram (Palette matching)
     4. Latent Spectrum (Anti-collapse check)
     """
-    original = original.cpu().numpy()
-    reconstructed = reconstructed.cpu().numpy()
+    original = original.cpu().detach().numpy()
+    reconstructed = reconstructed.cpu().detach().numpy()
     latent = latent.cpu().detach().numpy()
     
     if latent.ndim == 1:
         latent = latent[np.newaxis, :]
+        
+    # Auto-detect if reconstructed contains 10 class logits [10, H, W] instead of 1 channel
+    if reconstructed.ndim == 3 and reconstructed.shape[0] > 1:
+        reconstructed = np.argmax(reconstructed, axis=0)
+        
+    original = np.squeeze(original)
+    reconstructed = np.squeeze(reconstructed)
     
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     fig.suptitle(f"Phase 1 Diagnostic Dashboard - Epoch {epoch}", fontsize=16)
