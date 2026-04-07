@@ -52,6 +52,8 @@ WANDB_PROJECT = "NS-ARC-Slotted"
 
 # --- 4. Model Config ---
 from modules.encoders import SlotTransformerEncoder, SlotDecoder
+from modules.predictors import SlotJEPAPredictor
+from modules.rule_encoders import RuleEncoder
 from modules.world_models import SlotWorldModel32, SlotWorldModel64, SlotWorldModel128
 from modules.policies import SlotPPOPolicy
 from modules.curiosity import SlotRNDCuriosity
@@ -84,12 +86,19 @@ for name, setup in MODELS_CONFIG.items():
     PROFILES[name] = cfg
     
     MODELS[name] = {
-        'encoder': SlotTransformerEncoder(cfg).to(DEVICE),
+        'context_encoder': SlotTransformerEncoder(cfg).to(DEVICE),
+        'target_encoder': SlotTransformerEncoder(cfg).to(DEVICE),
+        'predictor': SlotJEPAPredictor(cfg).to(DEVICE),
+        'rule_encoder': RuleEncoder(cfg).to(DEVICE),
         'decoder': SlotDecoder(cfg).to(DEVICE),
         'world_model': setup['world_model'](cfg).to(DEVICE),
         'policy': SlotPPOPolicy(cfg).to(DEVICE),
         'curiosity': SlotRNDCuriosity(cfg).to(DEVICE)
     }
+    
+    MODELS[name]['target_encoder'].load_state_dict(MODELS[name]['context_encoder'].state_dict())
+    for param in MODELS[name]['target_encoder'].parameters():
+        param.requires_grad = False
 
 print("✅ Initiated Object-Centric Modules for all 3 Profiles.")
 
@@ -120,46 +129,58 @@ SAVE_DIR.mkdir(exist_ok=True)
 # --- 6. Slotted Training Utilities ---
 from analysis.plot_utils import plot_reconstruction_dashboard, plot_world_model_predictions, plot_slot_masks
 from analysis.evaluator import run_validation_epoch, get_dynamic_threshold
+from analysis.langevin_solver import LangevinGridSculptor
 
 def train_slotted_phase(phase, modules, cfg, tracker, current_step, wb_run, n_batches, batch_size, model_name="base", epoch=0, current_t=0.95):
     if phase == 'ae':
-        opt = torch.optim.AdamW(list(modules['encoder'].parameters()) + list(modules['decoder'].parameters()), lr=1e-3)
+        opt = torch.optim.AdamW(
+            list(modules['context_encoder'].parameters()) + 
+            list(modules['predictor'].parameters()) + 
+            list(modules['rule_encoder'].parameters()), 
+            lr=1e-3
+        )
     elif phase == 'wm':
-        opt = torch.optim.AdamW(list(modules['world_model'].parameters()) + list(modules['encoder'].parameters()), lr=1e-4)
+        opt = torch.optim.AdamW(list(modules['world_model'].parameters()) + list(modules['context_encoder'].parameters()), lr=1e-4)
     else: 
-        opt = torch.optim.AdamW([p for m in modules.values() for p in m.parameters()], lr=1e-5)
+        opt = torch.optim.AdamW([p for m in modules.values() for p in m.parameters() if p.requires_grad], lr=1e-5)
 
     for b in range(n_batches):
         batch = dataset.sample(batch_size)
         states = batch['state'].to(cfg['device'])
-        
+
         # --- Visualization Logic ---
-        if phase == 'ae' and epoch % 5 == 0 and b == 0:
-            modules['encoder'].eval(); modules['decoder'].eval()
+        if phase == 'ae' and epoch % 10 == 0 and b == 0:
+            modules['context_encoder'].eval(); modules['target_encoder'].eval(); modules['predictor'].eval()
+            
+            masks = (torch.rand_like(states) > 0.5).float()
+            context_states = states * masks
             with torch.no_grad():
-                z_dict = modules['encoder']({'state': states})
-                recon_out = modules['decoder']({'latent': z_dict['latent'], 'state': states})
+                z_c = modules['context_encoder']({'state': context_states})['latent']
+                z_pred = modules['predictor'](z_c)
                 
+            # Temporarily un-freeze Target Encoder purely for Langevin backward pass computation (no optimizer applied to it)
+            sculptor = LangevinGridSculptor(modules['target_encoder'], cfg['device'])
+            target_z_single = z_pred[0:1].detach() 
+            init_shape = (1, 1, states.shape[2], states.shape[3])
+            
+            hallucinated_grid = sculptor.sculpt(target_z_single, init_shape, steps=250, lr=0.1)
+            
+            with torch.no_grad():
                 orig = states[0, 0]
-                recon = recon_out['reconstruction'][0].squeeze(0) # [H, W]
+                recon = hallucinated_grid[0, 0] 
                 os.makedirs("evaluation_reports/plots", exist_ok=True)
-                viz_path = f"evaluation_reports/plots/slot_diag_{model_name}_ep_{epoch}.png"
-                plot_reconstruction_dashboard(orig, recon, z_dict['latent'][0], epoch, viz_path)
-                
-                mask_viz_path = f"evaluation_reports/plots/slot_masks_{model_name}_ep_{epoch}.png"
-                plot_slot_masks(recon_out['alphas'], epoch, mask_viz_path)
+                viz_path = f"evaluation_reports/plots/langevin_sculpt_{model_name}_ep_{epoch}.png"
+                plot_reconstruction_dashboard(orig, recon, z_pred[0], epoch, viz_path)
                 
                 if wb_run:
-                    wb_run.log({
-                        f"diagnostics/{phase}_slots": wandb.Image(viz_path),
-                        f"diagnostics/{phase}_masks": wandb.Image(mask_viz_path)
-                    }, step=current_step)
-            modules['encoder'].train(); modules['decoder'].train()
+                    wb_run.log({f"diagnostics/{phase}_langevin": wandb.Image(viz_path)}, step=current_step)
+                    
+            modules['context_encoder'].train(); modules['predictor'].train()
             
         elif phase == 'wm' and epoch % 5 == 0 and b == 0:
-            modules['world_model'].eval(); modules['decoder'].eval(); modules['encoder'].eval()
+            modules['world_model'].eval(); modules['decoder'].eval(); modules['context_encoder'].eval()
             with torch.no_grad():
-                z_start = modules['encoder']({'state': states})['latent']
+                z_start = modules['context_encoder']({'state': states})['latent']
                 action = torch.randn(batch_size, cfg['action_dim'], device=cfg['device']) 
                 wm_out = modules['world_model']({'latent': z_start, 'action': action})
                 
@@ -185,23 +206,59 @@ def train_slotted_phase(phase, modules, cfg, tracker, current_step, wb_run, n_ba
                 
                 if wb_run:
                     wb_run.log({f"diagnostics/{phase}_dreams": wandb.Image(viz_path)}, step=current_step)
-            modules['world_model'].train(); modules['decoder'].train(); modules['encoder'].train()
+            modules['world_model'].train(); modules['decoder'].train(); modules['context_encoder'].train()
         # ---------------------------
 
         if phase == 'ae':
-            z_dict = modules['encoder']({'state': states})
-            recon_out = modules['decoder']({'latent': z_dict['latent'], 'state': states})
-            loss_dict = modules['decoder'].loss({'state': states, 'latent': z_dict['latent'], 'hinge_threshold': current_t}, recon_out)
+            # --- Slot JEPA Pretraining with EBC ---
+            
+            # 1. Target Gen
+            with torch.no_grad():
+                z_t_dict = modules['target_encoder']({'state': states})
+                z_t = z_t_dict['latent'] # [B, slots, latent_dim]
+            
+            # 2. Context Gen (Block Masking)
+            masks = (torch.rand_like(states) > 0.5).float()
+            context_states = states * masks
+            
+            z_c_dict = modules['context_encoder']({'state': context_states})
+            z_c = z_c_dict['latent']
+            
+            # 3. Predict & EBC
+            z_pred = modules['predictor'](z_c)
+            
+            # JEPA Latent Prediction Loss
+            loss_jepa = F.mse_loss(z_pred, z_t)
+            
+            # Symbolic EBC Loss (Beta = 1.0)
+            beta = 1.0
+            rules = batch['rules']
+            z_rules_list = modules['rule_encoder'](rules) 
+            
+            loss_ebc = torch.tensor(0.0, device=cfg['device'])
+            num_valid = 0
+            for i in range(len(rules)):
+                if len(rules[i]) > 0:
+                    rule_centroid = z_rules_list[i].mean(dim=0)
+                    vis_centroid = z_pred[i].mean(dim=0)
+                    loss_ebc += F.mse_loss(vis_centroid, rule_centroid)
+                    num_valid += 1
+            
+            if num_valid > 0:
+                loss_ebc = loss_ebc / num_valid
+            
+            loss = loss_jepa + beta * loss_ebc
+            loss_dict = {"loss": loss, "jepa_loss": loss_jepa, "ebc_loss": loss_ebc}
         
         elif phase == 'wm':
-            z_start = modules['encoder']({'state': states})['latent'].detach() # [B, S, D]
+            z_start = modules['context_encoder']({'state': states})['latent'].detach() # [B, S, D]
             action = torch.randn(batch_size, cfg['action_dim'], device=cfg['device']) 
             out = modules['world_model']({'latent': z_start, 'action': action})
             
             # Encode true next state to get target latent for MSE comparison
             with torch.no_grad():
                 target_states = batch['target_state'].to(cfg['device'])
-                target_z = modules['encoder']({'state': target_states})['latent']
+                target_z = modules['target_encoder']({'state': target_states})['latent']
             
             loss_dict = modules['world_model'].loss(
                 {'target_latent': target_z, 'target_reward': batch['target_reward'].to(cfg['device'])}, 
@@ -212,8 +269,11 @@ def train_slotted_phase(phase, modules, cfg, tracker, current_step, wb_run, n_ba
 
         opt.zero_grad()
         loss_dict['loss'].backward()
-        torch.nn.utils.clip_grad_norm_([p for m in modules.values() for p in m.parameters()], 1.0)
+        torch.nn.utils.clip_grad_norm_([p for m in modules.values() for p in m.parameters() if p.requires_grad], 1.0)
         opt.step()
+        
+        if phase == 'ae':
+            modules['target_encoder'].update_ema(modules['context_encoder'], momentum=0.996)
         
         step = current_step + b
         tracker.log(phase, step, loss_dict)

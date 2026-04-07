@@ -146,8 +146,9 @@ class SlotTransformerEncoder(BaseEncoder):
         # Position embeddings for flat patches. Assuming 224x224 input -> 16x16 patches = 256. ARC grids are smaller, we'll make it dynamic or large enough
         self.patch_pos_embed = nn.Parameter(torch.randn(1, 1024, self.embed_dim)) # Over-provisioned
         
-        # Learned Slot Queries
-        self.slot_queries = nn.Parameter(torch.randn(1, self.num_slots, self.embed_dim))
+        # Learned Slot Prior Distributions (Stochastic Initialization)
+        self.slots_mu = nn.Parameter(torch.randn(1, 1, self.embed_dim))
+        self.slots_logsigma = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
         
         # Slot Attention Projections
         self.norm_inputs = nn.LayerNorm(self.embed_dim)
@@ -188,8 +189,10 @@ class SlotTransformerEncoder(BaseEncoder):
         k = self.k_proj(x)
         v = self.v_proj(x)
         
-        # Initialize slots
-        slots = self.slot_queries.expand(B, -1, -1)
+        # Initialize slots stochastically to break symmetry
+        mu = self.slots_mu.expand(B, self.num_slots, -1)
+        sigma = self.slots_logsigma.exp().expand(B, self.num_slots, -1)
+        slots = mu + sigma * torch.randn_like(mu)
         
         # Iterative Slot Attention
         for it in range(self.slot_iters):
@@ -223,6 +226,12 @@ class SlotTransformerEncoder(BaseEncoder):
         # Project to target latent dimensions
         z = self.projector(slots) # [B, num_slots, latent_dim]
         return {"latent": z}
+
+    @torch.no_grad()
+    def update_ema(self, student_model: nn.Module, momentum: float = 0.996):
+        """Updates this Target Encoder's weights via Exponential Moving Average of the Student Encoder."""
+        for param_t, param_s in zip(self.parameters(), student_model.parameters()):
+            param_t.data.mul_(momentum).add_((1.0 - momentum) * param_s.detach().data)
 
 class SlotDecoder(BaseEncoder):
     """

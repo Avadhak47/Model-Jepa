@@ -32,6 +32,30 @@ class Trainer:
                     weight_decay=config.get("weight_decay", 1e-4)
                 )
 
+    def load_checkpoint(self, tag: str = "latest"):
+        """
+        Load weights from a specific checkpoint tag (e.g., 'latest' or 'epoch_15').
+        Returns True if successful, False otherwise.
+        """
+        load_path = os.path.join(self.ckpt_dir, tag)
+        if not os.path.exists(load_path):
+            print(f"[Trainer] No checkpoint found at {load_path}")
+            return False
+
+        print(f"[Trainer] Resuming from checkpoint: {load_path}")
+        for name, module in self.modules.items():
+            path = os.path.join(load_path, f"{name}.pt")
+            if os.path.exists(path):
+                try:
+                    state_dict = torch.load(path, map_location=self.device)
+                    module.load_state_dict(state_dict)
+                    print(f"  \u2705 Loaded {name}")
+                except Exception as e:
+                    print(f"  \u274c Error loading {name}: {e}")
+            else:
+                print(f"  \u26a0\ufe0f Missing {name}.pt in checkpoint.")
+        return True
+
     # ─── utility ────────────────────────────────────────────────────────────
     def _encode(self, state_tensor):
         """Encode a raw state tensor to a latent dict via encoder module."""

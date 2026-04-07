@@ -66,7 +66,7 @@ class ReARCDataset:
                 for ex in examples[: self.max_pairs]:
                     inp  = self._pad(ex["input"])
                     out  = self._pad(ex["output"])
-                    self.pairs.append((inp, out))
+                    self.pairs.append((inp, out, []))
             except Exception:
                 pass   # skip malformed files silently
 
@@ -79,26 +79,62 @@ class ReARCDataset:
         for _ in range(n):
             inp = np.zeros((self.MAX_GRID, self.MAX_GRID), dtype=np.float32)
             out = np.zeros((self.MAX_GRID, self.MAX_GRID), dtype=np.float32)
+            rules = []
             
             # Add 2-6 distinct semantic objects
             for _ in range(rng.integers(2, 7)):
-                color = rng.integers(1, 10)
-                obj_type = rng.integers(0, 3)
-                r, c = rng.integers(0, self.MAX_GRID-1, size=2)
+                color = int(rng.integers(1, 10))
+                obj_type = int(rng.integers(0, 7))
+                r, c = map(int, rng.integers(0, self.MAX_GRID-1, size=2))
                 
-                if obj_type == 0: # 1x1 Dot (stress-tests focal loss)
-                    inp[r, c] = color
-                    out[r, c] = color
-                elif obj_type == 1: # Horizontal Line
-                    w = rng.integers(3, 10)
-                    inp[r:min(r+w, self.MAX_GRID), c] = color
-                    out[r:min(r+w, self.MAX_GRID), c] = color
-                elif obj_type == 2: # Solid Rectangle
-                    w, h = rng.integers(3, 8, size=2)
-                    inp[r:min(r+w, self.MAX_GRID), c:min(c+h, self.MAX_GRID)] = color
-                    out[r:min(r+w, self.MAX_GRID), c:min(c+h, self.MAX_GRID)] = color
+                # Bounds check helper
+                def draw(rr, cc, w, h, pattern_mask=None):
+                    new_w = min(rr+w, self.MAX_GRID) - rr
+                    new_h = min(cc+h, self.MAX_GRID) - cc
+                    if new_w > 0 and new_h > 0:
+                        if pattern_mask is None:
+                            inp[rr:rr+new_w, cc:cc+new_h] = color
+                            out[rr:rr+new_w, cc:cc+new_h] = color
+                        else:
+                            mask = pattern_mask[:new_w, :new_h]
+                            inp[rr:rr+new_w, cc:cc+new_h] = np.where(mask, color, inp[rr:rr+new_w, cc:cc+new_h])
+                            out[rr:rr+new_w, cc:cc+new_h] = np.where(mask, color, out[rr:rr+new_w, cc:cc+new_h])
+                        rules.append({"type": obj_type, "color": color, "r": rr, "c": cc, "w": new_w, "h": new_h})
+                
+                if obj_type == 0: # 1x1 Dot
+                    draw(r, c, 1, 1)
+                elif obj_type == 1: # Solid Rectangle (or Line if w=1 or h=1)
+                    w, h = map(int, rng.integers(1, 8, size=2))
+                    draw(r, c, w, h)
+                elif obj_type == 2: # Hollow Rectangle
+                    w, h = map(int, rng.integers(3, 8, size=2))
+                    mask = np.ones((w, h), dtype=bool)
+                    mask[1:-1, 1:-1] = False
+                    draw(r, c, w, h, mask)
+                elif obj_type == 3: # Cross (+)
+                    w, h = map(int, rng.integers(3, 7, size=2))
+                    if w % 2 == 0: w += 1
+                    if h % 2 == 0: h += 1
+                    mask = np.zeros((w, h), dtype=bool)
+                    mask[w//2, :] = True
+                    mask[:, h//2] = True
+                    draw(r, c, w, h, mask)
+                elif obj_type == 4: # L-Shape
+                    w, h = map(int, rng.integers(3, 7, size=2))
+                    mask = np.zeros((w, h), dtype=bool)
+                    mask[:, 0] = True
+                    mask[-1, :] = True
+                    draw(r, c, w, h, mask)
+                elif obj_type == 5: # Random Amorphous Blob
+                    w, h = map(int, rng.integers(3, 6, size=2))
+                    mask = rng.choice([True, False], size=(w, h), p=[0.7, 0.3])
+                    draw(r, c, w, h, mask)
+                elif obj_type == 6: # Complex Chequerboard (Fractal approximation)
+                    w, h = map(int, rng.integers(4, 9, size=2))
+                    mask = np.indices((w, h)).sum(axis=0) % 2 == 0
+                    draw(r, c, w, h, mask)
 
-            self.pairs.append((inp, out))
+            self.pairs.append((inp, out, rules))
 
     def __len__(self):
         return len(self.pairs)
@@ -113,6 +149,7 @@ class ReARCDataset:
 
         states  = np.stack([p[0] for p in chosen])   # [B, H, W]
         targets = np.stack([p[1] for p in chosen])
+        rules = [p[2] for p in chosen]
 
         # Shape: [B, 1, 30, 30]  (1 channel so CNNEncoder / TransformerEncoder work directly)
         s_t = torch.tensor(states,  dtype=torch.float32).unsqueeze(1)
@@ -121,6 +158,7 @@ class ReARCDataset:
         return {
             "state":          s_t,
             "target_state":   t_t,
+            "rules":          rules,
             # Aliases expected by World Model loss and ReplayBuffer
             "target_latent":  t_t.view(batch_size, -1)[:, :128] if t_t.numel() // batch_size >= 128
                               else t_t.view(batch_size, -1).repeat(1, 128)[:, :128],
