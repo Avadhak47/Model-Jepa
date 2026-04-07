@@ -118,9 +118,10 @@ SAVE_DIR = pathlib.Path('./checkpoints')
 SAVE_DIR.mkdir(exist_ok=True)
 
 # --- 6. Slotted Training Utilities ---
-from analysis.plot_utils import plot_reconstruction_dashboard, plot_world_model_predictions
+from analysis.plot_utils import plot_reconstruction_dashboard, plot_world_model_predictions, plot_slot_masks
+from analysis.evaluator import run_validation_epoch, get_dynamic_threshold
 
-def train_slotted_phase(phase, modules, cfg, tracker, current_step, wb_run, n_batches, batch_size, model_name="base", epoch=0):
+def train_slotted_phase(phase, modules, cfg, tracker, current_step, wb_run, n_batches, batch_size, model_name="base", epoch=0, current_t=0.95):
     if phase == 'ae':
         opt = torch.optim.AdamW(list(modules['encoder'].parameters()) + list(modules['decoder'].parameters()), lr=1e-3)
     elif phase == 'wm':
@@ -145,8 +146,14 @@ def train_slotted_phase(phase, modules, cfg, tracker, current_step, wb_run, n_ba
                 viz_path = f"evaluation_reports/plots/slot_diag_{model_name}_ep_{epoch}.png"
                 plot_reconstruction_dashboard(orig, recon, z_dict['latent'][0], epoch, viz_path)
                 
+                mask_viz_path = f"evaluation_reports/plots/slot_masks_{model_name}_ep_{epoch}.png"
+                plot_slot_masks(recon_out['alphas'], epoch, mask_viz_path)
+                
                 if wb_run:
-                    wb_run.log({f"diagnostics/{phase}_slots": wandb.Image(viz_path)}, step=current_step)
+                    wb_run.log({
+                        f"diagnostics/{phase}_slots": wandb.Image(viz_path),
+                        f"diagnostics/{phase}_masks": wandb.Image(mask_viz_path)
+                    }, step=current_step)
             modules['encoder'].train(); modules['decoder'].train()
             
         elif phase == 'wm' and epoch % 5 == 0 and b == 0:
@@ -183,8 +190,8 @@ def train_slotted_phase(phase, modules, cfg, tracker, current_step, wb_run, n_ba
 
         if phase == 'ae':
             z_dict = modules['encoder']({'state': states})
-            out = modules['decoder']({'latent': z_dict['latent'], 'state': states})
-            loss_dict = modules['decoder'].loss({'state': states, 'latent': z_dict['latent']}, out)
+            recon_out = modules['decoder']({'latent': z_dict['latent'], 'state': states})
+            loss_dict = modules['decoder'].loss({'state': states, 'latent': z_dict['latent'], 'hinge_threshold': current_t}, recon_out)
         
         elif phase == 'wm':
             z_start = modules['encoder']({'state': states})['latent'].detach() # [B, S, D]
@@ -249,16 +256,34 @@ if __name__ == "__main__":
         
         print(f"\n{'='*55}\n Training {model_name}\n{'='*55}")
         current_step = 0
+        last_val_acc = 0.0
         
         for epoch in range(N_EPOCHS):
-            current_step = train_slotted_phase('ae',  modules, cfg, TRACKERS[model_name], current_step, wb_run, BATCHES_PER_PHASE, BATCH_SIZE, model_name, epoch)
+            # 1. Compute dynamic curriculum threshold
+            current_t = get_dynamic_threshold(last_val_acc, min_t=0.5, max_t=0.98)
+            
+            # 2. Run Phase 1
+            current_step = train_slotted_phase('ae', modules, cfg, TRACKERS[model_name], current_step, wb_run, BATCHES_PER_PHASE, BATCH_SIZE, model_name, epoch, current_t)
             
             recent_ae_losses = TRACKERS[model_name].get('ae/loss')[-BATCHES_PER_PHASE:]
             mean_ae_loss = sum(recent_ae_losses) / len(recent_ae_losses) if recent_ae_losses else float('inf')
             
             if mean_ae_loss > AE_LOSS_THRESHOLD:
-                print(f'  Epoch {epoch+1:>2}/{N_EPOCHS} | Stage 1 ({mean_ae_loss:.4f}): Slotted Encoder unstable.')
+                print(f'  Epoch {epoch+1:>2}/{N_EPOCHS} | Phase 1 ({mean_ae_loss:.4f}): Slotted Encoder unstable.')
                 save_and_upload_slotted(model_name, modules, epoch, wb_run=wb_run)
+                
+                # --- END OF EPOCH VALIDATION ---
+                val_loss, val_acc = run_validation_epoch(modules, dataset, phase='ae', device=DEVICE)
+                last_val_acc = val_acc # UPDATE TRACKER HERE
+                
+                print(f"      [Validation] Loss: {val_loss:.4f} | Accuracy: {val_acc*100:.2f}% | Hinge T: {current_t:.3f}")
+                
+                if wb_run:
+                    wb_run.log({
+                        "ae/val_loss": val_loss,
+                        "ae/val_accuracy": val_acc,
+                        "ae/hinge_threshold": current_t
+                    }, step=current_step)
                 continue
                 
             print(f'  Epoch {epoch+1:>2}/{N_EPOCHS} | Phase 1 ({mean_ae_loss:.4f}) <= {AE_LOSS_THRESHOLD}. Downstream!')
