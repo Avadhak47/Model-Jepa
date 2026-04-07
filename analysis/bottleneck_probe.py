@@ -8,15 +8,14 @@ class ARCDiagnosticProbe(nn.Module):
     An overpowered spatial Convolutional structure designed 
     to extract 2D patterns directly from a flattened slot vector.
     """
-    def __init__(self, num_slots=16, latent_dim=128, vocab_size=10, grid_size=30):
+    def __init__(self, flat_latent_dim, vocab_size=10, grid_size=30):
         super().__init__()
-        self.num_slots = num_slots
-        self.latent_dim = latent_dim
+        self.flat_latent_dim = flat_latent_dim
         self.vocab_size = vocab_size
         self.grid_size = grid_size
         
-        # We start by mapping the flat [B, 2048] to a [B, 256, 3, 3] spatial feature map
-        self.fc = nn.Linear(num_slots * latent_dim, 256 * 3 * 3)
+        # We start by mapping the flat feature dim to a [B, 256, 3, 3] spatial feature map
+        self.fc = nn.Linear(flat_latent_dim, 256 * 3 * 3)
         self.unflatten = nn.Unflatten(1, (256, 3, 3))
         
         # Spatial upsampling (ConvTranspose) to understand 2D geometry
@@ -74,8 +73,19 @@ def run_bottleneck_analysis(model_name: str, modules: dict, dataset_obj, device=
             
     avg_baseline = sum(baseline_losses) / len(baseline_losses)
     
+    # --- DYNAMIC SHAPE DETECTION ---
+    # Automatically adapt to either Global Encoders [B, 128] or Slotted Encoders [B, 16, 128]
+    print("   ↳ Detecting latent architecture topology...")
+    with torch.no_grad():
+        test_batch = dataset_obj.sample(2)
+        test_x = test_batch['state'].to(device)
+        test_z = encoder({'state': test_x})['latent']
+        test_z_flat = test_z.view(test_z.size(0), -1)
+        actual_flat_dim = test_z_flat.shape[1]
+        print(f"     [Info] Detected flat latent dimension: {actual_flat_dim}")
+    
     # 2. Build the Spatial Probe
-    probe = ARCDiagnosticProbe().to(device)
+    probe = ARCDiagnosticProbe(flat_latent_dim=actual_flat_dim).to(device)
     optimizer = optim.Adam(probe.parameters(), lr=2e-4) # Slightly higher LR for fast probe training
     
     # 3. Train the Probe
