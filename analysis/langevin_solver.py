@@ -26,6 +26,10 @@ class LangevinGridSculptor:
         Returns:
             The final snapped discrete grid.
         """
+        # Detach the target latent so PyTorch doesn't try to backpropagate 
+        # into the encoder that originally generated it!
+        target_latent = target_latent.detach()
+        
         # Initialize continuous grid canvas
         grid_continuous = nn.Parameter(torch.rand(init_shape, device=self.device) * 9.0)
         
