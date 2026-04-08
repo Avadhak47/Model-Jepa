@@ -139,6 +139,7 @@ class SlotTransformerEncoder(BaseEncoder):
         self.latent_dim = config.get("latent_dim", 128)
         self.num_slots = config.get("num_slots", 16)
         self.slot_iters = config.get("slot_iters", 3)
+        self.temperature = config.get("slot_temperature", 0.1) # Prevents fuzzy slot sharing
         
         # Grid -> Patch Embeddings
         self.patch_embed = nn.Conv2d(in_channels, self.embed_dim, kernel_size=patch_size, stride=patch_size)
@@ -209,7 +210,7 @@ class SlotTransformerEncoder(BaseEncoder):
             # --- THE ANTI-COLLAPSE SECRET ---
             # Softmax over the SLOTS axis (dim=1). Competition for pixels.
             # Temperature annealing could be added here for harder assignments.
-            attn = F.softmax(attn, dim=1) 
+            attn = F.softmax(attn / self.temperature, dim=1) 
             # --------------------------------
             
             # Normalize attention so each slot's total weight sums to 1
