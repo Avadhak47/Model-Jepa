@@ -147,24 +147,35 @@ class SlotTransformerEncoder(BaseEncoder):
         # Position embeddings for flat patches. Assuming 224x224 input -> 16x16 patches = 256. ARC grids are smaller, we'll make it dynamic or large enough
         self.patch_pos_embed = nn.Parameter(torch.randn(1, 1024, self.embed_dim)) # Over-provisioned
         
-        # Learned Slot Prior Distributions (Stochastic Initialization)
-        self.slots_mu = nn.Parameter(torch.randn(1, 1, self.embed_dim))
-        self.slots_logsigma = nn.Parameter(torch.ones(1, 1, self.embed_dim) * -3.0)
-        
-        # Slot Attention Projections
+        # ── Slot prior: shared Gaussian, initialised with glorot_uniform per paper ──
+        # shape [1, 1, embed_dim] — shared across ALL slots (paper §3.1)
+        self.slots_mu = nn.Parameter(torch.empty(1, 1, self.embed_dim))
+        self.slots_logsigma = nn.Parameter(torch.empty(1, 1, self.embed_dim))
+        nn.init.xavier_uniform_(self.slots_mu.data.view(1, self.embed_dim).unsqueeze(0))
+        nn.init.xavier_uniform_(self.slots_logsigma.data.view(1, self.embed_dim).unsqueeze(0))
+
+        # ── Slot Attention Projections (no bias on Q/K per paper) ──
         self.norm_inputs = nn.LayerNorm(self.embed_dim)
-        self.norm_slots = nn.LayerNorm(self.embed_dim)
-        
-        self.q_proj = nn.Linear(self.embed_dim, self.embed_dim)
-        self.k_proj = nn.Linear(self.embed_dim, self.embed_dim)
-        self.v_proj = nn.Linear(self.embed_dim, self.embed_dim)
-        
+        self.norm_slots  = nn.LayerNorm(self.embed_dim)
+        self.norm_mlp    = nn.LayerNorm(self.embed_dim)   # norm BEFORE slot MLP
+
+        self.q_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
+        self.k_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
+        self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
+
         self.gru = nn.GRUCell(self.embed_dim, self.embed_dim)
-        
-        # Relational Self-Attention between slots
+
+        # ── Slot MLP (CRITICAL — paper adds residual MLP after every GRU step) ──
+        self.slot_mlp = nn.Sequential(
+            nn.Linear(self.embed_dim, self.embed_dim * 2),
+            nn.ReLU(),
+            nn.Linear(self.embed_dim * 2, self.embed_dim)
+        )
+
+        # ── Relational Self-Attention between slots ──
         self.relational_attn = nn.MultiheadAttention(self.embed_dim, num_heads=4, batch_first=True)
-        
-        # Projection to latent slot size
+
+        # ── Projection to latent slot size ──
         self.projector = nn.Sequential(
             nn.LayerNorm(self.embed_dim),
             nn.Linear(self.embed_dim, self.embed_dim),
@@ -198,38 +209,46 @@ class SlotTransformerEncoder(BaseEncoder):
         else:
             slots = mu
         
-        # Iterative Slot Attention
+        # ── Iterative Slot Attention (following paper §3.1 exactly) ──
+        # attn shape: [B, N, num_slots]  (patches × slots)
         for it in range(self.slot_iters):
             slots_prev = slots
-            slots_norm = self.norm_slots(slots)
-            q = self.q_proj(slots_norm)
-            
-            # Dot-product attention: [B, slots, embed_dim] @ [B, embed_dim, N] -> [B, slots, N]
-            attn = torch.bmm(q, k.transpose(1, 2)) / (self.embed_dim ** 0.5)
-            
-            # --- THE ANTI-COLLAPSE SECRET ---
-            # Softmax over the SLOTS axis (dim=1). Competition for pixels.
-            # Temperature annealing could be added here for harder assignments.
-            attn = F.softmax(attn / self.temperature, dim=1) 
-            # --------------------------------
-            
-            # Normalize attention so each slot's total weight sums to 1
-            attn_norm = attn / (attn.sum(dim=-1, keepdim=True) + 1e-8)
-            
-            # Aggregate values
-            updates = torch.bmm(attn_norm, v)
-            
-            # Update slots via GRU
-            slots = self.gru(updates.reshape(-1, self.embed_dim), slots_prev.reshape(-1, self.embed_dim))
-            slots = slots.reshape(B, self.num_slots, self.embed_dim)
+            slots_norm = self.norm_slots(slots)       # [B, S, D]
+            q = self.q_proj(slots_norm)               # [B, S, D]
+
+            # Attention logits: [B, N, S]
+            scale = self.embed_dim ** -0.5
+            attn_logits = torch.bmm(k, q.transpose(1, 2)) * scale  # [B, N, S]
+
+            # Step 1: softmax over SLOTS (dim=-1) per paper — slots compete for each patch
+            attn = F.softmax(attn_logits / self.temperature, dim=-1)   # [B, N, S]
+
+            # Step 2: normalise over PATCHES so each slot's weights sum to 1
+            # Add epsilon for stability (paper uses epsilon=1e-8)
+            attn_norm = attn + 1e-8
+            attn_norm = attn_norm / attn_norm.sum(dim=1, keepdim=True)  # [B, N, S]
+
+            # Weighted mean: updates shape [B, S, D]
+            updates = torch.bmm(attn_norm.transpose(1, 2), v)           # [B, S, D]
+
+            # GRU update
+            slots = self.gru(
+                updates.reshape(-1, self.embed_dim),
+                slots_prev.reshape(-1, self.embed_dim)
+            ).reshape(B, self.num_slots, self.embed_dim)
+
+            # Residual slot MLP (CRITICAL — paper §3.1, missing in previous code)
+            slots = slots + self.slot_mlp(self.norm_mlp(slots))
             
         # Relational Extraction (Slots talk to slots)
         slots_rel, _ = self.relational_attn(slots, slots, slots)
         slots = slots + slots_rel
-        
+
         # Project to target latent dimensions
-        z = self.projector(slots) # [B, num_slots, latent_dim]
-        masks = attn.view(B, self.num_slots, H, W).detach()
+        z = self.projector(slots)  # [B, num_slots, latent_dim]
+
+        # attn is [B, N, S] — reshape to spatial mask [B, S, H, W]
+        masks = attn.transpose(1, 2).view(B, self.num_slots, H, W).detach()
 
         # Expose slot prior parameters for KL loss (Slot-VAE style)
         # Gradients flow through z, mu/logsigma are for the training loop's KL calculation
