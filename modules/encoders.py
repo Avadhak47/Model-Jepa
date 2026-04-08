@@ -230,7 +230,18 @@ class SlotTransformerEncoder(BaseEncoder):
         # Project to target latent dimensions
         z = self.projector(slots) # [B, num_slots, latent_dim]
         masks = attn.view(B, self.num_slots, H, W).detach()
-        return {"latent": z, "masks": masks}
+
+        # Expose slot prior parameters for KL loss (Slot-VAE style)
+        # Gradients flow through z, mu/logsigma are for the training loop's KL calculation
+        slot_mu = self.slots_mu.expand(B, self.num_slots, -1)
+        slot_logsigma = self.slots_logsigma.expand(B, self.num_slots, -1)
+
+        return {
+            "latent": z,
+            "masks": masks,
+            "slot_mu": slot_mu,
+            "slot_logsigma": slot_logsigma
+        }
 
     @torch.no_grad()
     def update_ema(self, student_model: nn.Module, momentum: float = 0.996):
