@@ -297,12 +297,14 @@ class SlotDecoder(BaseEncoder):
         colors = colors.view(B, num_slots, C, H, W)
         alphas = alphas.view(B, num_slots, 1, H, W)
         
-        # Gumbel-Softmax for hard 0/1 masks during forward, smooth gradients during backward
-        # Temperature could be annealed to 0.1 during training
-        alphas_normalized = F.gumbel_softmax(alphas, tau=0.5, hard=True, dim=1)
+        # Soft alpha competition across slots per pixel (dim=1 = slot axis)
+        # Use plain Softmax — smooth gradients are essential for early convergence.
+        # The model will naturally learn peaked (hard) alphas as recon loss guides it.
+        # Original Slot Attention paper also uses spatial softmax masks, not Gumbel-hard.
+        alphas_normalized = F.softmax(alphas, dim=1)  # [B, num_slots, 1, H, W]
         
         # Composite final image
-        reconstruction = torch.sum(alphas_normalized * colors, dim=1) # [B, C, H, W]
+        reconstruction = torch.sum(alphas_normalized * colors, dim=1)  # [B, C, H, W]
         
         return {
             "reconstruction": reconstruction,
