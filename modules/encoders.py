@@ -228,7 +228,8 @@ class SlotTransformerEncoder(BaseEncoder):
         
         # Project to target latent dimensions
         z = self.projector(slots) # [B, num_slots, latent_dim]
-        return {"latent": z}
+        masks = attn.view(B, self.num_slots, H, W).detach()
+        return {"latent": z, "masks": masks}
 
     @torch.no_grad()
     def update_ema(self, student_model: nn.Module, momentum: float = 0.996):

@@ -38,7 +38,14 @@ class LangevinGridSculptor:
             encoded_dict = self.encoder({'state': grid_continuous})
             z_cand = encoded_dict['latent']
             
-            loss = F.mse_loss(z_cand, target_latent)
+            loss_mse = F.mse_loss(z_cand, target_latent)
+            
+            # Total Variation (TV) Loss to penalize high-frequency static
+            tv_h = torch.mean(torch.abs(grid_continuous[:, :, 1:, :] - grid_continuous[:, :, :-1, :]))
+            tv_w = torch.mean(torch.abs(grid_continuous[:, :, :, 1:] - grid_continuous[:, :, :, :-1]))
+            loss_tv = tv_h + tv_w
+            
+            loss = loss_mse + 0.1 * loss_tv
             loss.backward()
             
             torch.nn.utils.clip_grad_norm_([grid_continuous], 1.0)
