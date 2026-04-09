@@ -268,60 +268,100 @@ class SlotTransformerEncoder(BaseEncoder):
         for param_t, param_s in zip(self.parameters(), student_model.parameters()):
             param_t.data.mul_(momentum).add_((1.0 - momentum) * param_s.detach().data)
 
+class SoftPositionEmbed(nn.Module):
+    """
+    Positional encoding from the Slot Attention paper (§3.2).
+    Builds a coordinate grid [x, y, 1-x, 1-y] and projects it through a
+    learned linear layer, then adds to the input features.
+    This gives the decoder spatial awareness — each pixel position gets a
+    unique signal so the slot vector can produce different outputs at
+    different locations.
+    """
+    def __init__(self, hidden_size, resolution):
+        super().__init__()
+        self.dense = nn.Linear(4, hidden_size)
+        self.register_buffer("grid", self._build_grid(resolution))
+
+    @staticmethod
+    def _build_grid(resolution):
+        ranges = [torch.linspace(0.0, 1.0, steps=r) for r in resolution]
+        grid = torch.meshgrid(*ranges, indexing="ij")
+        grid = torch.stack(grid, dim=-1)                    # [H, W, 2]
+        grid = torch.cat([grid, 1.0 - grid], dim=-1)       # [H, W, 4]
+        return grid.unsqueeze(0)                            # [1, H, W, 4]
+
+    def forward(self, x):
+        # x: [B, C, H, W] (channels-first PyTorch convention)
+        # grid: [1, H, W, 4]
+        pos = self.dense(self.grid)             # [1, H, W, hidden_size]
+        pos = pos.permute(0, 3, 1, 2)          # [1, hidden_size, H, W]
+        return x + pos
+
+
 class SlotDecoder(BaseEncoder):
     """
     Decodes K independent slots into a single grid via Alpha-Mask Compositing.
-    Implements Gumbel-Softmax for discrete boundary extraction and Hinge Loss for diversity.
+    Now includes SoftPositionEmbed (matching the paper) so the decoder can
+    produce spatially-varying output per slot — forcing z to encode position,
+    shape, and color (not just color).
     """
     def __init__(self, config: dict):
         super().__init__(config)
         self.latent_dim = config.get("latent_dim", 128)
-        self.vocab_size = config.get("vocab_size", 10) # 10 ARC Colors
-        self.grid_size = config.get("grid_size", 30) # Default max size for ARC grids, can be dynamically broadcasted
+        self.vocab_size = config.get("vocab_size", 10)  # 10 ARC Colors
+        self.grid_size = config.get("grid_size", 30)
         self.num_slots = config.get("num_slots", 16)
-        
-        # Spatial Broadcast CNN
+
+        # Positional encoding for decoder (paper §3.2 — the missing piece)
+        self.decoder_pos = SoftPositionEmbed(self.latent_dim, (self.grid_size, self.grid_size))
+
+        # Spatial Broadcast CNN (deeper to match paper's 6-layer decoder)
         self.spatial_broadcast = nn.Sequential(
-            nn.ConvTranspose2d(self.latent_dim, 64, kernel_size=3, stride=1, padding=1),
+            nn.ConvTranspose2d(self.latent_dim, 64, kernel_size=5, stride=1, padding=2),
             nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, kernel_size=3, stride=1, padding=1),
-            nn.ReLU()
+            nn.ConvTranspose2d(64, 64, kernel_size=5, stride=1, padding=2),
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 32, kernel_size=5, stride=1, padding=2),
+            nn.ReLU(),
         )
-        
+
         # Color Map (Logits) and Alpha Mask predictors
+        # Paper outputs channels+1 from final conv; we keep separate heads for clarity
         self.color_predictor = nn.Conv2d(32, self.vocab_size, kernel_size=3, padding=1)
         self.alpha_predictor = nn.Conv2d(32, 1, kernel_size=3, padding=1)
-        
+
         self.to(self.device)
 
     def forward(self, inputs: dict) -> dict:
-        z = inputs["latent"].to(self.device) # [B, num_slots, latent_dim]
+        z = inputs["latent"].to(self.device)  # [B, num_slots, latent_dim]
         B, num_slots, D = z.shape
-        
+
         target_size = inputs["state"].shape[-2:] if "state" in inputs else (self.grid_size, self.grid_size)
         H, W = target_size
-        
+
         # Spatial Broadcast: Tile each slot vector across an HxW grid
         z_flat = z.view(B * num_slots, D, 1, 1)
-        z_tiled = z_flat.expand(-1, -1, H, W) # [B*num_slots, D, H, W]
-        
+        z_tiled = z_flat.expand(-1, -1, H, W)  # [B*num_slots, D, H, W]
+
+        # ── ADD POSITIONAL ENCODING (paper §3.2) ──
+        # Each pixel now gets: slot_vector + pos(x, y)
+        # This lets the decoder produce different output at different positions
+        z_tiled = self.decoder_pos(z_tiled)
+
         # Decode components
         decoded_features = self.spatial_broadcast(z_tiled)
-        
-        colors = self.color_predictor(decoded_features) # [B*num_slots, C, H, W]
-        alphas = self.alpha_predictor(decoded_features) # [B*num_slots, 1, H, W]
-        
+
+        colors = self.color_predictor(decoded_features)  # [B*num_slots, C, H, W]
+        alphas = self.alpha_predictor(decoded_features)  # [B*num_slots, 1, H, W]
+
         # Reshape to slot dimension for competition
         C = colors.shape[1]
         colors = colors.view(B, num_slots, C, H, W)
         alphas = alphas.view(B, num_slots, 1, H, W)
-        
-        # Soft alpha competition across slots per pixel (dim=1 = slot axis)
-        # Use plain Softmax — smooth gradients are essential for early convergence.
-        # The model will naturally learn peaked (hard) alphas as recon loss guides it.
-        # Original Slot Attention paper also uses spatial softmax masks, not Gumbel-hard.
+
+        # Soft alpha competition across slots per pixel
         alphas_normalized = F.softmax(alphas, dim=1)  # [B, num_slots, 1, H, W]
-        
+
         # Composite final image
         reconstruction = torch.sum(alphas_normalized * colors, dim=1)  # [B, C, H, W]
         
