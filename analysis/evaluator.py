@@ -41,7 +41,8 @@ def run_validation_epoch(modules: dict, dataset, phase: str, batch_size=32, devi
                 loss_dict = modules['decoder'].loss({'state': states, 'latent': z_dict['latent']}, out)
                 
                 # Track pixel-level accuracy
-                acc = check_accuracy(out['reconstruction'], states)
+                recon_tensor = out.get('reconstruction', out.get('reconstructed_logits'))
+                acc = check_accuracy(recon_tensor, states)
                 
                 # Robustly fetch loss: fallback to 'loss' if specific sub-losses are missing
                 l_val = loss_dict.get('recon_loss', loss_dict.get('mse_loss', loss_dict['loss']))

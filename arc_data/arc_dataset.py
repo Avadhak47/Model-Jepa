@@ -35,7 +35,7 @@ class ARCDataset:
         padded[:h, :w] = arr[:h, :w]
         return padded
         
-    def sample(self, batch_size: int) -> dict:
+    def sample(self, batch_size: int, split: str = 'train', **kwargs) -> dict:
         """Parses actual JSON tasks into padded batched TensorDicts."""
         states = []
         targets = []
