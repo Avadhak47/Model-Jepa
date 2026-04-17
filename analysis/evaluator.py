@@ -18,16 +18,33 @@ def check_accuracy(pred_logits, target_grid):
         return correct.mean().item()
     return 0.0
 
+def check_perfect_regen(pred_logits, target_grid):
+    """
+    Computes percentage of grids in the batch that are perfectly reconstructed.
+    """
+    if pred_logits.dim() == 4 and target_grid.dim() == 4:
+        pred_classes = torch.argmax(pred_logits, dim=1)
+        target_classes = target_grid.squeeze(1).long()
+        
+        batch_size = pred_classes.shape[0]
+        correct_per_pixel = (pred_classes == target_classes).view(batch_size, -1)
+        perfect_grids = correct_per_pixel.all(dim=1).float()
+        return perfect_grids.mean().item()
+    return 0.0
+
 def run_validation_epoch(modules: dict, dataset, phase: str, batch_size=32, device='cuda'):
     """
     Runs a single validation epoch across the active modules.
     Returns the average validation loss and accuracy.
     """
     # Phase 1: Freeze everything for evaluation
-    for m in modules.values(): m.eval()
+    for m in modules.values():
+        if hasattr(m, 'eval'):
+            m.eval()
     
     val_losses = []
     val_accs = []
+    val_perfects = []
     
     with torch.no_grad():
         # Sample exactly 10 batches to form a solid statistical average
@@ -40,14 +57,16 @@ def run_validation_epoch(modules: dict, dataset, phase: str, batch_size=32, devi
                 out = modules['decoder']({'latent': z_dict['latent'], 'state': states})
                 loss_dict = modules['decoder'].loss({'state': states, 'latent': z_dict['latent']}, out)
                 
-                # Track pixel-level accuracy
+                # Track pixel-level accuracy and perfect regen
                 recon_tensor = out.get('reconstruction', out.get('reconstructed_logits'))
                 acc = check_accuracy(recon_tensor, states)
+                perf = check_perfect_regen(recon_tensor, states)
                 
                 # Robustly fetch loss: fallback to 'loss' if specific sub-losses are missing
                 l_val = loss_dict.get('recon_loss', loss_dict.get('mse_loss', loss_dict['loss']))
                 val_losses.append(l_val.item() if hasattr(l_val, 'item') else float(l_val))
                 val_accs.append(acc)
+                val_perfects.append(perf)
                 
             elif phase == 'wm':
                 z_start = modules['encoder']({'state': states})['latent']
@@ -73,14 +92,16 @@ def run_validation_epoch(modules: dict, dataset, phase: str, batch_size=32, devi
                 l_val = loss_dict.get('z_loss', loss_dict.get('loss', 0.0))
                 val_losses.append(l_val.item() if hasattr(l_val, 'item') else float(l_val))
                 val_accs.append(0.0) 
+                val_perfects.append(0.0)
                 
     # Phase 2: Unfreeze architecture and return to training
     for m in modules.values(): m.train()
     
     avg_loss = sum(val_losses) / len(val_losses)
     avg_acc = sum(val_accs) / max(1, len([a for a in val_accs if a > 0]))
+    avg_perf = sum(val_perfects) / max(1, len([p for p in val_perfects if p >= 0]))
     
-    return avg_loss, avg_acc
+    return avg_loss, avg_acc, avg_perf
 
 def plot_loss_curves(train_history, val_history, phase_name, save_path="evaluation_reports/plots/train_val_curve.png"):
     """

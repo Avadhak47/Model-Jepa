@@ -1,0 +1,7 @@
+HDBSCAN Unsupervised Metric Breakdown
+======================================
+Total Isolated Semantic Clusters: 157
+Background Noise Ratio: 68.0%
+
+Transformation Cohesion Score: 29.9%
+ - Note: Measures whether applying physical symmetries knocks vectors out of their neural category.
