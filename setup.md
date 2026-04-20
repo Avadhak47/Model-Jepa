@@ -301,3 +301,19 @@ exit
 | `conda activate` doesn't work | Run `conda init bash` then restart terminal |
 | Jupyter token not working | SSH tunnel is required! Without proper SSH tunnel setup, it will not work. Ensure Step 4.2 is completed. |
 | Permission denied on proxy.sh | Run `chmod +x proxy.sh` |
+
+---
+
+## 7. Key Ports Reference
+
+| Service | Port/Number | Notes |
+|---------|-------------|-------|
+| **JupyterLab (Remote)** | `8889` | Port used on the Lab Server (`jupyter lab --port=8889`) |
+| **JupyterLab (Local)** | `8890` | Port used on Personal Machine for SSH tunnel (`http://localhost:8890`) |
+| **PhD Proxy** | `61` | Used in `proxy.sh` and proxy URL (`proxy61.iitd.ac.in:3128`) |
+| **MTech/MS Proxy** | `62` | Used in `proxy.sh` and proxy URL (`proxy62.iitd.ac.in:3128`) |
+| **BTech Proxy** | `22` | Used in `proxy.sh` and proxy URL (`proxy22.iitd.ac.in:3128`) |
+| **Staff Proxy** | `82` | Used in `proxy.sh` and proxy URL (`proxy82.iitd.ac.in:3128`) |
+| **Proxy Communication** | `3128` | Default port used in `export` env variables (`...:3128`) |
+
+> **Pro-Tip:** If the JupyterLab remote port (`8889`) is already taken by another user on the server, you can use a different port (e.g., `8891`). Just remember to update your SSH tunnel command accordingly: `ssh -N -L 8890:localhost:<NEW_PORT> user@10.225.67.239`.

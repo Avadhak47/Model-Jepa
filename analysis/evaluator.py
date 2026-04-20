@@ -95,7 +95,9 @@ def run_validation_epoch(modules: dict, dataset, phase: str, batch_size=32, devi
                 val_perfects.append(0.0)
                 
     # Phase 2: Unfreeze architecture and return to training
-    for m in modules.values(): m.train()
+    for m in modules.values():
+        if hasattr(m, 'train'):
+            m.train()
     
     avg_loss = sum(val_losses) / len(val_losses)
     avg_acc = sum(val_accs) / max(1, len([a for a in val_accs if a > 0]))

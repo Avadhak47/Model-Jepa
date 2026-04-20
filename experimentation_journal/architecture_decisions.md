@@ -92,4 +92,23 @@
 
 ---
 
+## 1️⃣3️⃣ W&B Artifact Retrieval Fix – *Why?*
+- **Change**: Updated the `pull_absolute_last_model` function to correctly search for `{run_name}_{module}_slotted` artifact names and reinstated the `try/except` block to gracefully handle missing modules.
+- **Rationale**: The previous script crashed with a W&B HTTP 404 (Not Found) error because the project correctly appended `_slotted` to model artifacts (e.g., `encoder_slotted`), while the retrieval logic assumed `{run_name}_{module}`. Furthermore, some runs were test runs like `Phase1-PaperLoss` that didn't upload models, which crashed the whole script instead of gracefully skipping.
+- **Expected Behaviour**: Robust artifact fetching from W&B without brittle crashes on empty runs, enabling fluid resumption of pre-trained slotted models.
+
+---
+
+## 1️⃣4️⃣ NS-ARC Slot Representation Collapse & Harmonic Prior Protection – *Why?*
+- **Change**: Introduced `mask_entropy_loss` to force sharp attention allocations and applied a `OneCycleLR` warmup curriculum to the slotted models. Reduced the `vic_loss` coefficient from 0.5 to 0.2.
+- **Rationale**: The Harmonic initialization for slots created beautifully disentangled starting distributions. However, standard `AdamW` with harsh `VICReg` variance penalties catastrophically shattered these priors. Without an explicit penalty for overlapping slot geometry, the GRU converged to a safe "uniform background" average, destroying object segregation. The entropy loss forces mutually-exclusive slot assignments.
+- **Expected Behaviour**: Elimination of the "Epoch 80 Slot Collapse". Clean, persistent separation of objects into distinct 128-dimensional vectors natively matching ARC components.
+
+## 1️⃣5️⃣ VQ Bottleneck Repositioning (Programmatic Routines) – *Why?*
+- **Change**: Relocated the Vector Quantizer (`vq_bottleneck` of $K=128$) from the spatial decoder map ($D=32$) directly to the pre-decoded Slot Latents ($D=128$).
+- **Rationale**: Applying quantization deep in the decoder merely discretizes colors and textures. By hooking it directly to the 128-dimensional Slot latents immediately after the encoder, the model is forced to map abstract object transformations and ARC "concepts" into a discrete vocabulary of higher-level programmatic routines.
+- **Expected Behaviour**: Superior alignment with rule-based rule-induction systems. Discrete programmatic states instead of vague semantic smears.
+
+---
+
 *All decisions are documented with supporting experiment logs in the `analysis/` folder and W&B runs referenced in the notebook.*
