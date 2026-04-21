@@ -23,7 +23,7 @@ class TransformerDecoder(BaseTrainableModule):
             batch_first=True,
             norm_first=True
         )
-        self.transformer = nn.TransformerEncoder(dec_layer, num_layers=2)
+        self.transformer = nn.TransformerEncoder(dec_layer, num_layers=2, enable_nested_tensor=False)
         
         # Predict the exact color category (0-9) for each pixel
         self.head = nn.Linear(self.hidden_dim, self.vocab_size)
