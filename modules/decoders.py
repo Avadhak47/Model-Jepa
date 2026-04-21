@@ -137,3 +137,28 @@ class PatchDecoder(TransformerDecoder):
         logits = self.pixel_generator(x) # [B, 10, 30, 30]
         
         return {'reconstructed_logits': logits}
+
+    def loss(self, inputs: dict, outputs: dict, w_fg=50.0, gamma=2.0) -> dict:
+        """
+        Foreground-Weighted Focal Loss implementation to prevent Background Collapse (Lazy Minima).
+        """
+        state = inputs['state'].long() # [B, 1, 30, 30]
+        state = state.squeeze(1) # [B, 30, 30]
+        
+        recon_logits = outputs['reconstructed_logits'] # [B, 10, 30, 30]
+        
+        # 1. Base Cross Entropy
+        ce_loss = torch.nn.functional.cross_entropy(recon_logits, state, reduction='none')
+        
+        # 2. Foreground Weighting Mask (Target > 0 gets w_fg weight)
+        mask_fg = (state > 0).float()
+        weight_matrix = 1.0 + (mask_fg * (w_fg - 1.0))
+        
+        # 3. Focal Modulation
+        pt = torch.exp(-ce_loss)
+        recon_loss = (((1 - pt) ** gamma) * ce_loss * weight_matrix).mean()
+        
+        return {
+            "loss": recon_loss,
+            "recon_loss": recon_loss.detach()
+        }

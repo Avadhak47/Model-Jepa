@@ -24,8 +24,12 @@ class FactorizedVectorQuantizer(nn.Module):
         # Codebook B: Color (Low Capacity)
         self.embedding_color = nn.Embedding(self.num_color_codes, self.half_dim)
         self.embedding_color.weight.data.uniform_(-1/self.num_color_codes, 1/self.num_color_codes)
+        
+        # Utilization Tracking for Codebook Resurrection
+        self.register_buffer('shape_usage', torch.zeros(self.num_shape_codes))
+        self.register_buffer('color_usage', torch.zeros(self.num_color_codes))
 
-    def _quantize(self, flat_input, embedding_layer, num_codes):
+    def _quantize(self, flat_input, embedding_layer, num_codes, usage_buffer=None):
         # Calculate Euclidean distances
         distances = (torch.sum(flat_input**2, dim=1, keepdim=True) 
                     + torch.sum(embedding_layer.weight**2, dim=1)
@@ -39,6 +43,9 @@ class FactorizedVectorQuantizer(nn.Module):
         # Quantize
         quantized = torch.matmul(encodings, embedding_layer.weight)
         
+        if usage_buffer is not None and self.training:
+            usage_buffer.scatter_add_(0, encoding_indices.view(-1), torch.ones_like(encoding_indices.view(-1), dtype=torch.float))
+            
         # Perplexity (Utilization Metric)
         avg_probs = torch.mean(encodings, dim=0)
         perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
@@ -64,8 +71,8 @@ class FactorizedVectorQuantizer(nn.Module):
         flat_color = flat_input[:, self.half_dim:]
         
         # Quantize independently
-        quantized_shape, perp_shape = self._quantize(flat_shape, self.embedding_shape, self.num_shape_codes)
-        quantized_color, perp_color = self._quantize(flat_color, self.embedding_color, self.num_color_codes)
+        quantized_shape, perp_shape = self._quantize(flat_shape, self.embedding_shape, self.num_shape_codes, self.shape_usage)
+        quantized_color, perp_color = self._quantize(flat_color, self.embedding_color, self.num_color_codes, self.color_usage)
         
         # Concat back together
         quantized_flat = torch.cat([quantized_shape, quantized_color], dim=1)
@@ -115,3 +122,37 @@ class FactorizedVectorQuantizer(nn.Module):
         
         semantic_slots = torch.cat([sampled_shapes, sampled_colors], dim=1) # [10, 128]
         return semantic_slots.unsqueeze(0) # [1, 10, 128]
+
+    @torch.no_grad()
+    def resurrect_dead_codes(self, inputs):
+        """
+        Teleports dead vectors directly into highly active data clusters.
+        Expects raw inputs structure directly from encoder prior to quantization.
+        """
+        is_spatial = inputs.dim() == 4
+        if is_spatial:
+            inputs_perm = inputs.permute(0, 2, 3, 1).contiguous()
+        else:
+            inputs_perm = inputs.contiguous()
+            
+        flat_input = inputs_perm.view(-1, self.embedding_dim)
+        flat_shape = flat_input[:, :self.half_dim]
+        flat_color = flat_input[:, self.half_dim:]
+        
+        # Check Shape Codebook
+        dead_shape_mask = self.shape_usage == 0
+        num_dead_shapes = dead_shape_mask.sum().item()
+        if num_dead_shapes > 0:
+            rand_indices = torch.randint(0, flat_shape.size(0), (num_dead_shapes,), device=inputs.device)
+            self.embedding_shape.weight.data[dead_shape_mask] = flat_shape[rand_indices].clone().to(self.embedding_shape.weight.dtype)
+            
+        # Check Color Codebook
+        dead_color_mask = self.color_usage == 0
+        num_dead_colors = dead_color_mask.sum().item()
+        if num_dead_colors > 0:
+            rand_indices = torch.randint(0, flat_color.size(0), (num_dead_colors,), device=inputs.device)
+            self.embedding_color.weight.data[dead_color_mask] = flat_color[rand_indices].clone().to(self.embedding_color.weight.dtype)
+            
+        # Reset counters
+        self.shape_usage.zero_()
+        self.color_usage.zero_()
