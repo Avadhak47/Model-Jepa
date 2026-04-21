@@ -102,6 +102,19 @@ class TransformerEncoder(BaseEncoder):
         z = self.projector(cls_out)
         return {"latent": z}
 
+class DeepTransformerEncoder(TransformerEncoder):
+    """Deep Continuous Baseline without slots."""
+    def __init__(self, config):
+        cfg = dict(config)
+        cfg['_enc_depth'] = cfg.get('enc_depth', 4)
+        super().__init__(cfg)
+        embed_dim = cfg.get('hidden_dim', 128)
+        enc_layer = torch.nn.TransformerEncoderLayer(
+            d_model=embed_dim, nhead=8, dim_feedforward=embed_dim*4,
+            batch_first=True, norm_first=True
+        )
+        self.transformer = torch.nn.TransformerEncoder(enc_layer, num_layers=cfg['_enc_depth'])
+
 class Decoder(BaseEncoder):
     """Inverts the latent space back to pixel space for autencoding metrics."""
     def __init__(self, config: dict):
