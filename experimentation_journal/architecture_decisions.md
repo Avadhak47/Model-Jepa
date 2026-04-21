@@ -134,3 +134,8 @@
 ---
 
 *All decisions are documented with supporting experiment logs in the `analysis/` folder and W&B runs referenced in the notebook.*
+
+## 2️⃣0️⃣ Patch-Based Vector Quantization (SLATE Architecture) – *Why?*
+- **Change**: Replaced the global `CNNEncoder` in Phase 0 with a sequence-outputting `PatchTransformerEncoder`, completely fracturing the grid into 2x2 local patches prior to quantization.
+- **Rationale**: A globally-pooled continuous vector effectively maps "Whole Grid Situations" to single codebook entries, which destroys object separability. By quantizing at the independent patch level (a strategy proven by Google Brain's SLATE model), we force the discrete Codebook to learn atomic "Primitives" (corners, 3-block-L-shapes, lines) rather than full memorized grids.
+- **Expected Behaviour**: The dictionary will be populated with truly reusable spatial Legos instead of full scenes. The Phase 1 Slots, having been initialized by these Legos, will aggregate the primitives into logical, separate entities.

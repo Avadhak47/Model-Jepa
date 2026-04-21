@@ -116,6 +116,50 @@ class DeepTransformerEncoder(TransformerEncoder):
         self.transformer = torch.nn.TransformerEncoder(enc_layer, num_layers=cfg['_enc_depth'], enable_nested_tensor=False)
         self.to(self.device)
 
+class PatchTransformerEncoder(BaseEncoder):
+    """
+    Patch-based ViT Encoder for SLATE-style discrete tokenization.
+    Outputs a sequence of latent patch representations instead of a single global descriptor.
+    """
+    def __init__(self, config: dict):
+        super().__init__(config)
+        self.in_channels = config.get("in_channels", 1)
+        self.patch_size = config.get("patch_size", 2)
+        embed_dim = config.get("hidden_dim", 128)
+        self.latent_dim = config.get("latent_dim", 128)
+        
+        self.patch_embed = nn.Conv2d(self.in_channels, embed_dim, kernel_size=self.patch_size, stride=self.patch_size)
+        
+        # Max patches for 32x32 with patch 2 is 16x16 = 256. 400 is overly safe scale.
+        self.pos_embed = nn.Parameter(torch.randn(1, 400, embed_dim)) 
+        
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim, nhead=4, dim_feedforward=embed_dim*4,
+            batch_first=True, norm_first=True
+        )
+        self.transformer = nn.TransformerEncoder(enc_layer, num_layers=2, enable_nested_tensor=False)
+        
+        self.projector = nn.Sequential(
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, self.latent_dim)
+        )
+        self.to(self.device)
+        
+    def forward(self, inputs: dict) -> dict:
+        img = inputs["state"].float().to(self.device)
+        if img.dim() == 3: img = img.unsqueeze(1)
+        
+        x = self.patch_embed(img) # [B, D, H', W']
+        B, C, H, W = x.shape
+        x = x.flatten(2).transpose(1, 2) # [B, N, D]
+        N = x.shape[1]
+        
+        x = x + self.pos_embed[:, :N, :] 
+        x = self.transformer(x) # [B, N, D]
+        z = self.projector(x)   # [B, N, latent_dim]
+        
+        return {"latent": z, "spatial_shape": (H, W)}
+
 class Decoder(BaseEncoder):
     """Inverts the latent space back to pixel space for autencoding metrics."""
     def __init__(self, config: dict):
