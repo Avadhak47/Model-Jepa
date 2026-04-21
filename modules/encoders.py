@@ -114,6 +114,7 @@ class DeepTransformerEncoder(TransformerEncoder):
             batch_first=True, norm_first=True
         )
         self.transformer = torch.nn.TransformerEncoder(enc_layer, num_layers=cfg['_enc_depth'], enable_nested_tensor=False)
+        self.to(self.device)
 
 class Decoder(BaseEncoder):
     """Inverts the latent space back to pixel space for autencoding metrics."""
