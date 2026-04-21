@@ -111,4 +111,26 @@
 
 ---
 
+## 1️⃣6️⃣ Factorized Vector Quantization (Product Quantization) – *Why?*
+- **Change**: Replaced the single $K=128$ VQ codebook with two separate codebooks: Codebook A (Shape, $K=256$) and Codebook B (Color/Texture, $K=16$).
+- **Rationale**: A combined codebook requires exponentially large capacities ($K=4096$) to memorize combinations of geometry and colors, which crashes under index starvation. By splitting the 128-dim continuous slot vector in half, Codebook B physically cannot hold complex geometries (due to strict $16$-code bounds), mathematically forcing it to learn pure, low-variance colors, while Codebook A freely extracts the high-variance shapes.
+- **Expected Behaviour**: Massive combinatoric logic expansion ($256 \times 16 = 4096$ theoretical permutations) using only 272 physical trained vectors, bypassing the codebook collapse bottleneck entirely.
+
+## 1️⃣7️⃣ Phase 0 Pretraining (The Universal Dictionary) – *Why?*
+- **Change**: Established a strictly enforced *Dual-Phase Curriculum*. Phase 0 runs the Factorized VQ within a "dummy" non-slotted AutoEncoder to pre-train a universal dictionary of ARC rule logic prior to Phase 1. 
+- **Rationale**: Simultaneously forcing Slot Attention to dynamically discover object boundaries *while* establishing a discrete logic library creates an insolvable optimization landscape. Phase 0 securely locks the logic rules dictionary independent of slot assignments. Target threshold: Perplexity $\approx 95\%$.
+- **Expected Behaviour**: Rapid Slot Convergence later in training, since the slots no longer have to guess what shapes or colors mean—they simply route existing pre-validated concepts.
+
+## 1️⃣8️⃣ Farthest Point Sampling (FPS) Semantic Initialization – *Why?*
+- **Change**: Replaced the Trigonometric Sine-wave spatial priors for the 10 empty slots with Semantic Initializations sourced directly from the Phase 0 Frozen Codebooks via Farthest Point Sampling.
+- **Rationale**: While Harmonic Priors perfectly organize slots by spatial coordinates, FPS initializes the slots using actual, proven conceptual primitives (e.g., Slot 1 = "Orange Square", Slot 2 = "Red Line"). Farthest Point Sampling guarantees that the initial concepts are mathematically as distinct as possible to avoid slot collision.
+- **Expected Behaviour**: Slots enter the grid actively searching for specific semantic targets (Semantic Object Routing) rather than passively hovering over spatial regions, severely mitigating the "Winner-Take-All" snowball collapse.
+
+## 1️⃣9️⃣ Sobel Edges, One-Hot Colors, and 2D RoPE – *Why?*
+- **Change**: The input feature CNN is injected with X/Y Sobel gradients and 10-Class One-Hot Embedding channels instead of raw integers. The resulting 12-channel patches undergo a 1-layer Transformer Self-Attention equipped with 2D Rotary Positional Embeddings (RoPE) before being passed to the Slot modules.
+- **Rationale**: A raw CNN treats Categorical color `9` as geometrically larger than color `1`, destroying logic rules. Expanding this into One-Hots fixes the magnitude inequality. Adding Sobel explicitly injects edge-awareness. Applying RoPE ensures patches execute localized "self-contextualization" so that borders are mathematically distinguishable from uniform backgrounds, curing the Slot Snowball weakness at the roots.
+- **Expected Behaviour**: Perfectly verified and highly distinct local regions, accelerating border detection natively.
+
+---
+
 *All decisions are documented with supporting experiment logs in the `analysis/` folder and W&B runs referenced in the notebook.*
