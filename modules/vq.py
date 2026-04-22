@@ -7,6 +7,10 @@ class FactorizedVectorQuantizer(nn.Module):
     Factorized VQ Bottleneck.
     Splits the continuous vector into two distinct dictionaries to force
     unsupervised categorization of high-variance (Shape) and low-variance (Color/Texture).
+    
+    Includes:
+    - Padding-masked perplexity: excludes padded zero-patches from entropy calculation
+    - Padding-filtered surgery pool: dead code reset only samples real content patches
     """
     def __init__(self, num_shape_codes=256, num_color_codes=16, embedding_dim=128, commitment_cost=0.25):
         super().__init__()
@@ -29,13 +33,18 @@ class FactorizedVectorQuantizer(nn.Module):
         self.register_buffer('shape_usage', torch.zeros(self.num_shape_codes))
         self.register_buffer('color_usage', torch.zeros(self.num_color_codes))
 
-    def _quantize(self, flat_input, embedding_layer, num_codes, usage_buffer=None):
+    def _quantize(self, flat_input, embedding_layer, num_codes, usage_buffer=None, valid_mask=None):
+        """
+        valid_mask: Optional bool tensor [N_total] — True for real patches, False for padding.
+        When provided, perplexity is calculated ONLY over real (non-padded) patches.
+        This prevents padded zeros from dominating entropy and falsely suppressing perplexity.
+        """
         # Calculate Euclidean distances
         distances = (torch.sum(flat_input**2, dim=1, keepdim=True) 
                     + torch.sum(embedding_layer.weight**2, dim=1)
                     - 2 * torch.matmul(flat_input, embedding_layer.weight.t()))
                     
-        # Encode
+        # Encode (all patches — quantization itself is unaffected by masking)
         encoding_indices = torch.argmin(distances, dim=1).unsqueeze(1)
         encodings = torch.zeros(encoding_indices.shape[0], num_codes, device=flat_input.device)
         encodings.scatter_(1, encoding_indices, 1)
@@ -43,19 +52,32 @@ class FactorizedVectorQuantizer(nn.Module):
         # Quantize
         quantized = torch.matmul(encodings, embedding_layer.weight)
         
+        # Usage tracking: only count real patches toward utilization
         if usage_buffer is not None and self.training:
-            usage_buffer.scatter_add_(0, encoding_indices.view(-1), torch.ones_like(encoding_indices.view(-1), dtype=torch.float))
+            if valid_mask is not None:
+                real_indices = encoding_indices.view(-1)[valid_mask]
+            else:
+                real_indices = encoding_indices.view(-1)
+            usage_buffer.scatter_add_(0, real_indices, torch.ones_like(real_indices, dtype=torch.float))
             
-        # Perplexity (Utilization Metric)
-        avg_probs = torch.mean(encodings, dim=0)
+        # Perplexity: computed ONLY over real (non-padded) patches
+        # This is the research-recommended fix for padding-inflated perplexity suppression
+        if valid_mask is not None:
+            real_encodings = encodings[valid_mask]
+        else:
+            real_encodings = encodings
+            
+        avg_probs = torch.mean(real_encodings, dim=0)
         perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
         
         return quantized, perplexity
 
-    def forward(self, inputs):
+    def forward(self, inputs, valid_mask=None):
         """
-        Expects inputs of shape [B, C, H, W] where C = embedding_dim.
-        OR [B, N, C]
+        Expects inputs of shape [B, C, H, W] where C = embedding_dim, OR [B, N, C].
+        
+        valid_mask: Optional bool tensor [B, N] where True = real content patch,
+                    False = zero-padding patch. Used to compute unbiased perplexity.
         """
         is_spatial = inputs.dim() == 4
         if is_spatial:
@@ -66,23 +88,39 @@ class FactorizedVectorQuantizer(nn.Module):
             
         flat_input = inputs_perm.view(-1, self.embedding_dim)
         
+        # Flatten valid_mask to [B*N] to align with flat_input
+        flat_valid_mask = valid_mask.view(-1) if valid_mask is not None else None
+        
         # Factorize the vector
         flat_shape = flat_input[:, :self.half_dim]
         flat_color = flat_input[:, self.half_dim:]
         
-        # Quantize independently
-        quantized_shape, perp_shape = self._quantize(flat_shape, self.embedding_shape, self.num_shape_codes, self.shape_usage)
-        quantized_color, perp_color = self._quantize(flat_color, self.embedding_color, self.num_color_codes, self.color_usage)
+        # Quantize independently (both receive the same spatial valid_mask)
+        quantized_shape, perp_shape = self._quantize(
+            flat_shape, self.embedding_shape, self.num_shape_codes,
+            self.shape_usage, flat_valid_mask
+        )
+        quantized_color, perp_color = self._quantize(
+            flat_color, self.embedding_color, self.num_color_codes,
+            self.color_usage, flat_valid_mask
+        )
         
         # Concat back together
         quantized_flat = torch.cat([quantized_shape, quantized_color], dim=1)
         
-        # Losses
-        e_latent_loss = F.mse_loss(quantized_flat.detach(), flat_input)
-        q_latent_loss = F.mse_loss(quantized_flat, flat_input.detach())
+        # Losses — only over real patches if mask provided
+        if flat_valid_mask is not None:
+            flat_input_real = flat_input[flat_valid_mask]
+            quantized_flat_real = quantized_flat[flat_valid_mask]
+            e_latent_loss = F.mse_loss(quantized_flat_real.detach(), flat_input_real)
+            q_latent_loss = F.mse_loss(quantized_flat_real, flat_input_real.detach())
+        else:
+            e_latent_loss = F.mse_loss(quantized_flat.detach(), flat_input)
+            q_latent_loss = F.mse_loss(quantized_flat, flat_input.detach())
+            
         loss = q_latent_loss + self.commitment_cost * e_latent_loss
         
-        # Straight-through estimator
+        # Straight-through estimator (applied to ALL patches so shape is preserved)
         quantized_flat = flat_input + (quantized_flat - flat_input).detach()
         quantized = quantized_flat.view(inputs_perm.shape)
         
@@ -124,10 +162,13 @@ class FactorizedVectorQuantizer(nn.Module):
         return semantic_slots.unsqueeze(0) # [1, 10, 128]
 
     @torch.no_grad()
-    def resurrect_dead_codes(self, inputs):
+    def resurrect_dead_codes(self, inputs, valid_mask=None):
         """
-        Teleports dead vectors directly into highly active data clusters.
-        Expects raw inputs structure directly from encoder prior to quantization.
+        Teleports dead vectors directly into highly active REAL content clusters.
+        
+        valid_mask: Optional bool tensor [B, N] — when provided, pads are excluded
+                    from the surgery candidate pool so dead codes are never seeded with
+                    zero-padding representations (which would die again immediately).
         """
         is_spatial = inputs.dim() == 4
         if is_spatial:
@@ -136,23 +177,45 @@ class FactorizedVectorQuantizer(nn.Module):
             inputs_perm = inputs.contiguous()
             
         flat_input = inputs_perm.view(-1, self.embedding_dim)
-        flat_shape = flat_input[:, :self.half_dim]
-        flat_color = flat_input[:, self.half_dim:]
         
-        # Check Shape Codebook
+        # Filter pool: only keep REAL (non-padded) patches for surgery candidates
+        if valid_mask is not None:
+            flat_valid = valid_mask.view(-1)
+            real_flat = flat_input[flat_valid]
+            if real_flat.size(0) == 0:
+                # Safety fallback: if no real patches (shouldn't happen), skip surgery
+                self.shape_usage.zero_()
+                self.color_usage.zero_()
+                return
+        else:
+            real_flat = flat_input
+            
+        real_shape = real_flat[:, :self.half_dim]
+        real_color = real_flat[:, self.half_dim:]
+
+        n_real = real_shape.size(0)
+        
+        # Check Shape Codebook — sample ONLY from real content patches
         dead_shape_mask = self.shape_usage == 0
         num_dead_shapes = dead_shape_mask.sum().item()
         if num_dead_shapes > 0:
-            rand_indices = torch.randint(0, flat_shape.size(0), (num_dead_shapes,), device=inputs.device)
-            self.embedding_shape.weight.data[dead_shape_mask] = flat_shape[rand_indices].clone().to(self.embedding_shape.weight.dtype)
+            rand_indices = torch.randint(0, n_real, (num_dead_shapes,), device=inputs.device)
+            self.embedding_shape.weight.data[dead_shape_mask] = \
+                real_shape[rand_indices].clone().to(self.embedding_shape.weight.dtype)
             
-        # Check Color Codebook
+        # Check Color Codebook — same filtered pool
         dead_color_mask = self.color_usage == 0
         num_dead_colors = dead_color_mask.sum().item()
         if num_dead_colors > 0:
-            rand_indices = torch.randint(0, flat_color.size(0), (num_dead_colors,), device=inputs.device)
-            self.embedding_color.weight.data[dead_color_mask] = flat_color[rand_indices].clone().to(self.embedding_color.weight.dtype)
+            rand_indices = torch.randint(0, n_real, (num_dead_colors,), device=inputs.device)
+            self.embedding_color.weight.data[dead_color_mask] = \
+                real_color[rand_indices].clone().to(self.embedding_color.weight.dtype)
             
-        # Reset counters
+        n_resurrected_shapes = num_dead_shapes
+        n_resurrected_colors = num_dead_colors
+        
+        # Reset counters for the next interval
         self.shape_usage.zero_()
         self.color_usage.zero_()
+        
+        return n_resurrected_shapes, n_resurrected_colors
