@@ -123,7 +123,8 @@ class PatchTransformerEncoder(BaseEncoder):
     """
     def __init__(self, config: dict):
         super().__init__(config)
-        self.in_channels = config.get("in_channels", 1)
+        # Using One-Hots instead of raw integers to avoid categorical magnitude bias
+        self.in_channels = 10
         self.patch_size = config.get("patch_size", 2)
         embed_dim = config.get("hidden_dim", 128)
         self.latent_dim = config.get("latent_dim", 128)
@@ -146,10 +147,17 @@ class PatchTransformerEncoder(BaseEncoder):
         self.to(self.device)
         
     def forward(self, inputs: dict) -> dict:
-        img = inputs["state"].float().to(self.device)
-        if img.dim() == 3: img = img.unsqueeze(1)
+        img = inputs["state"].long().to(self.device)
+        if img.dim() == 4 and img.size(1) == 1:
+            img = img.squeeze(1) # [B, H, W]
+        elif img.dim() == 2:
+            img = img.unsqueeze(0) # [1, H, W]
+            
+        # Convert integers to 10 distinct logical channels
+        img_onehot = F.one_hot(img, num_classes=10).float() # [B, H, W, 10]
+        img_onehot = img_onehot.permute(0, 3, 1, 2) # [B, 10, H, W]
         
-        x = self.patch_embed(img) # [B, D, H', W']
+        x = self.patch_embed(img_onehot) # [B, D, H', W']
         B, C, H, W = x.shape
         x = x.flatten(2).transpose(1, 2) # [B, N, D]
         N = x.shape[1]
