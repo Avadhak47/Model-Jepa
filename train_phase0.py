@@ -75,14 +75,14 @@ CFG = {
     # Architecture
     'device':               'cuda' if torch.cuda.is_available() else 'cpu',
     'in_channels':          10,       # One-Hot encoded ARC colors
-    'patch_size':           2,
+    'patch_size':           6,
     'hidden_dim':           128,
     'latent_dim':           128,
     'vocab_size':           10,
     'grid_size':            30,
     'focal_gamma':          2.0,
     'num_slots':            10,
-    'slot_iters':           3,
+    'slot_iters':           5,
     # Slot attention temperature schedule:
     #   Epoch 1 → slot_temp_start (high = soft/exploratory, all slots get gradient)
     #   Epoch slot_temp_anneal → slot_temp_end (low = sharp/specialised)
@@ -94,7 +94,7 @@ CFG = {
     'slot_temp_anneal':     300,      # epochs over which to linearly anneal
 
     # Phase 0 training
-    'p0_epochs':            399,   # Resume adds 99 more epochs on top of the 300 already done
+    'p0_epochs':            300,   # Resume adds 99 more epochs on top of the 300 already done
     'p0_steps':             100,
     'p0_batch':             128,
     'p0_lr':                1e-3,
@@ -108,11 +108,11 @@ CFG = {
     'num_color_codes':      16,
     'commitment_cost':      0.25,
     'surgery_interval':     25,
-    'surgery_quantile':     0.25,
+    'surgery_quantile':     0.15,
 
     # Phase 0 early stop
-    'p0_stop_perp_shape':   240.0,
-    'p0_stop_perp_color':   15.0,
+    'p0_stop_perp_shape':   230.0,
+    'p0_stop_perp_color':   14.0,
     'p0_stop_recon':        0.05,
 
     # Phase 1 training
@@ -127,7 +127,7 @@ CFG = {
     # Data
     'data_path':            'arc_data/re-arc',
     'eval_data_path':       'arc_data/re-arc/arc_original/evaluation',
-    'val_batch_size':       8,
+    'val_batch_size':       10,
 
     # Resume — point at the exact checkpoint files to continue from
     # Phase 0 is DONE (399 epochs). Point at its final checkpoint so the loop
