@@ -55,6 +55,23 @@ ARC_CMAP = ListedColormap(ARC_COLORS)
 # ═══════════════════════════════════════════════════════════════════════════
 # HELPERS
 # ═══════════════════════════════════════════════════════════════════════════
+def detect_patch_size(ckpt_path: str) -> int:
+    """
+    Read patch_size directly from the encoder's patch_embed Conv2d weight.
+    Weight shape: [out_ch, in_ch, kernel_h, kernel_w]  →  kernel_h == patch_size.
+    Falls back to 2 if the key is missing.
+    """
+    ckpt  = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    state = ckpt.get('model', ckpt)
+    for key in state:
+        if 'patch_embed.weight' in key:
+            # weight shape: [embed_dim, in_channels, patch_size, patch_size]
+            ps = state[key].shape[-1]
+            print(f"  🔎 Detected patch_size={ps} from '{key}' shape {tuple(state[key].shape)}")
+            return int(ps)
+    print("  ⚠️  Could not detect patch_size — defaulting to 2")
+    return 2
+
 def load_phase0(ckpt_path: str, cfg: dict, device: str):
     """Load the full Phase 0 autoencoder from a saved checkpoint."""
     encoder = PatchTransformerEncoder(cfg).to(device)
@@ -96,13 +113,14 @@ def patch_to_pixel(patch_tensor: torch.Tensor) -> np.ndarray:
 
 
 @torch.no_grad()
-def decode_single_code(decoder, code_vec: torch.Tensor, device: str) -> np.ndarray:
+def decode_single_code(decoder, code_vec: torch.Tensor, device: str,
+                       num_patches: int = 225) -> np.ndarray:
     """
-    Tile a single 128-d code vector across all 225 patch positions and run
-    the decoder. Returns a (30, 30) integer grid showing the 'primitive' the
-    code represents when the whole grid is made of that code.
+    Tile a single 128-d code vector across all num_patches patch positions and
+    run the decoder.  num_patches = (grid_size // patch_size)^2.
+    Returns a (30, 30) integer grid.
     """
-    z = code_vec.unsqueeze(0).unsqueeze(0).expand(1, 225, -1).to(device)   # [1, 225, 128]
+    z = code_vec.unsqueeze(0).unsqueeze(0).expand(1, num_patches, -1).to(device)
     out = decoder({'latent': z})
     logits = out['reconstructed_logits']     # [1, 10, 30, 30]  — PatchDecoder key
     grid = logits.argmax(dim=1).squeeze(0).cpu().numpy()                    # (30, 30)
@@ -172,6 +190,7 @@ def collect_patch_samples(encoder, vq, dataset, cfg: dict,
         shape_usage += np.bincount(s_idx, minlength=cfg['num_shape_codes'])
         color_usage += np.bincount(c_idx, minlength=cfg['num_color_codes'])
 
+    print(f"  ℹ️  Patch pixel size: {cfg['patch_size']}×{cfg['patch_size']} pixels per code entry")
     return shape_assigns, color_assigns, patch_pixels, shape_usage, color_usage
 
 
@@ -222,10 +241,11 @@ def plot_decoded_primitives(decoder, vq, device, out_dir):
     nrows = (vq.num_shape_codes + ncols - 1) // ncols
 
     fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 1.2, nrows * 1.2))
-    fig.suptitle("Shape Codebook — Decoded Primitives\n"
-                 "(Each tile = what the decoder produces when the whole grid is made of this code)",
+    fig.suptitle(f"Shape Codebook — Decoded Primitives (patch_size={decoder.patch_size})\n"
+                 "(Each tile = what the decoder produces when the whole grid is this code)",
                  fontsize=13, y=1.01)
 
+    num_patches = decoder.num_patches_per_grid
     for i, ax in enumerate(axes.flat):
         if i >= vq.num_shape_codes:
             ax.axis('off')
@@ -234,7 +254,7 @@ def plot_decoded_primitives(decoder, vq, device, out_dir):
         shape_vec = vq.embedding_shape.weight[i]         # [64]
         color_vec = vq.embedding_color.weight[0]         # [64]  use code-0 as neutral color
         code_vec  = torch.cat([shape_vec, color_vec])    # [128]
-        grid      = decode_single_code(decoder, code_vec, device)
+        grid      = decode_single_code(decoder, code_vec, device, num_patches=num_patches)
         ax.imshow(grid, cmap=ARC_CMAP, vmin=0, vmax=9, interpolation='nearest')
         ax.set_title(f'{i}', fontsize=5, pad=1)
         ax.axis('off')
@@ -258,13 +278,14 @@ def plot_color_primitives(decoder, vq, device, out_dir):
                  fontsize=13)
 
     shape_vec = vq.embedding_shape.weight[0]  # neutral shape
+    num_patches = decoder.num_patches_per_grid
     for i, ax in enumerate(axes.flat):
         if i >= vq.num_color_codes:
             ax.axis('off')
             continue
         color_vec = vq.embedding_color.weight[i]
         code_vec  = torch.cat([shape_vec, color_vec])
-        grid      = decode_single_code(decoder, code_vec, device)
+        grid      = decode_single_code(decoder, code_vec, device, num_patches=num_patches)
         ax.imshow(grid, cmap=ARC_CMAP, vmin=0, vmax=9, interpolation='nearest')
         ax.set_title(f'Color-{i}', fontsize=9)
         ax.axis('off')
@@ -441,7 +462,7 @@ def save_stats_json(shape_stats, color_stats, fps_shape_ids, out_dir):
 def main():
     parser = argparse.ArgumentParser(description='Audit the VQ-VAE codebook')
     parser.add_argument('--checkpoint', type=str,
-                        default='runs/FactorizedFPS-v3_2026-04-23_14-40-34/phase0/latest_checkpoint.pth',
+                        default='runs/FactorizedFPS-v3_2026-04-24_04-19-13/phase0/latest_checkpoint.pth',
                         help='Path to Phase 0 checkpoint (.pth)')
     parser.add_argument('--out',        type=str,
                         default='evaluation_reports/codebook_audit',
@@ -459,10 +480,14 @@ def main():
     print(f"   Output dir : {args.out}")
     print(f"   Device     : {args.device}")
 
+    # Auto-detect patch_size from the checkpoint so the audit always matches
+    # the architecture the model was actually trained with.
+    detected_patch_size = detect_patch_size(args.checkpoint)
+
     CFG = {
         'device':          args.device,
         'in_channels':     10,
-        'patch_size':      2,
+        'patch_size':      detected_patch_size,          # ← auto-detected, not hardcoded
         'hidden_dim':      128,
         'latent_dim':      128,
         'vocab_size':      10,
@@ -473,6 +498,10 @@ def main():
         'commitment_cost': 0.25,
         'batch_size':      128,
     }
+    num_patches = (CFG['grid_size'] // CFG['patch_size']) ** 2
+    print(f"   patch_size : {CFG['patch_size']}  →  {num_patches} patches per grid "
+          f"({CFG['grid_size']//CFG['patch_size']}×{CFG['grid_size']//CFG['patch_size']})")
+
 
     # ── Load model ───────────────────────────────────────────────────────────
     encoder, vq, decoder = load_phase0(args.checkpoint, CFG, args.device)

@@ -104,22 +104,29 @@ class PatchDecoder(TransformerDecoder):
     def __init__(self, config):
         super().__init__(config)
         self.patch_size = config.get('patch_size', 2)
-        
+
         dec_layer = nn.TransformerEncoderLayer(
-            d_model=self.latent_dim, 
-            nhead=4, 
+            d_model=self.latent_dim,
+            nhead=4,
             dim_feedforward=self.hidden_dim * 4,
-            batch_first=True, 
+            batch_first=True,
             norm_first=True
         )
         self.transformer = nn.TransformerEncoder(dec_layer, num_layers=2, enable_nested_tensor=False)
-        
+
         self.pixel_generator = nn.Sequential(
             nn.ConvTranspose2d(self.latent_dim, self.hidden_dim, kernel_size=self.patch_size, stride=self.patch_size),
             nn.ReLU(),
             nn.Conv2d(self.hidden_dim, self.vocab_size, kernel_size=3, padding=1)
         )
         self.to(self.device)
+
+    @property
+    def num_patches_per_grid(self) -> int:
+        """Number of patch tokens expected by this decoder (e.g. 225 for patch_size=2, 25 for patch_size=6)."""
+        grid_size = self.config.get('grid_size', 30)
+        side = grid_size // self.patch_size
+        return side * side
 
     def forward(self, inputs: dict) -> dict:
         z = inputs['latent']  # [B, N, D]
