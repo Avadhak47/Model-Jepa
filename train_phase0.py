@@ -32,6 +32,9 @@ Stability features:
 
 import sys
 import os
+
+# Reduce CUDA memory fragmentation (helps when two models share the GPU sequentially)
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 import signal
 import json
 import datetime
@@ -83,7 +86,7 @@ CFG = {
     'slot_temperature':     0.1,
 
     # Phase 0 training
-    'p0_epochs':            300,
+    'p0_epochs':            399,   # Resume adds 99 more epochs on top of the 300 already done
     'p0_steps':             100,
     'p0_batch':             128,
     'p0_lr':                1e-3,
@@ -107,7 +110,7 @@ CFG = {
     # Phase 1 training
     'p1_epochs':            1000,
     'p1_steps':             200,
-    'p1_batch':             128,
+    'p1_batch':             32,     # Reduced from 128 — SemanticDecoder spatial-broadcast is VRAM-heavy
     'p1_lr':                1e-4,
     'p1_grad_clip':         1.0,
     'p1_save_interval':     10,
@@ -118,9 +121,11 @@ CFG = {
     'eval_data_path':       'arc_data/re-arc/arc_original/evaluation',
     'val_batch_size':       8,
 
-    # Resume (optional — set to a .pth path to resume Phase 0 or Phase 1)
-    'p0_resume_from':       None,
-    'p1_resume_from':       None,
+    # Resume — point at the exact checkpoint files to continue from
+    # Phase 0 finished 300 epochs; resume to push it to 399
+    'p0_resume_from': 'runs/FactorizedFPS-v3_2026-04-23_14-01-30/phase0/latest_checkpoint.pth',
+    # Phase 1 is fresh (OOM crash before any progress)
+    'p1_resume_from': None,
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -350,9 +355,13 @@ def train_phase_0(cfg, p0_dir, wb_run, dataset):
             break
 
     # Save frozen VQ for Phase 1 FPS injection
-    torch.save(model.vq.state_dict(), vq_path)
+    # Detach the VQ from the full model before returning so the encoder and decoder
+    # weights become unreferenced and can be garbage-collected.
+    frozen_vq = model.vq.eval()
+    del model          # Free encoder + decoder weights from GPU now, not at GC whim
+    torch.save(frozen_vq.state_dict(), vq_path)
     print(f"\n💾 Frozen VQ codebook → {vq_path}")
-    return model.vq.eval(), vq_path
+    return frozen_vq, vq_path
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -604,6 +613,18 @@ def main(cfg: dict):
         if wb_run:
             wb_run.finish()
         return
+
+    # ── Free GPU before Phase 1 ──────────────────────────────────────────────
+    # Phase0Autoencoder (encoder+vq+decoder) is still alive on GPU.
+    # Explicitly delete it and clear the cache so Phase 1 has room.
+    # frozen_vq itself is tiny (just the embedding tables).
+    import gc
+    frozen_vq = frozen_vq.cpu()   # Keep the tables, move them off GPU
+    gc.collect()
+    torch.cuda.empty_cache()
+    free_mb = torch.cuda.mem_get_info()[0] / 1024**2
+    print(f"\n🧹 GPU cleared after Phase 0. Free VRAM: {free_mb:.0f} MiB")
+    frozen_vq = frozen_vq.to(device)  # Move back for FPS sampling
 
     # ── Phase 1 ─────────────────────────────────────────────────────────────
     train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset)
