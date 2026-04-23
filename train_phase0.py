@@ -69,7 +69,7 @@ except ImportError:
 # ═══════════════════════════════════════════════════════════════════════════
 CFG = {
     # Run identity
-    'run_name':             'FactorizedFPS-v3',
+    'run_name':             'FactorizedFPS-v4',  # patch6-slot5iters
     'wandb_project':        'NS-ARC-Scaling',
 
     # Architecture
@@ -94,7 +94,7 @@ CFG = {
     'slot_temp_anneal':     300,      # epochs over which to linearly anneal
 
     # Phase 0 training
-    'p0_epochs':            300,   # Resume adds 99 more epochs on top of the 300 already done
+    'p0_epochs':            300,   # Fresh run — patch_size=6 is incompatible with v3 checkpoint
     'p0_steps':             100,
     'p0_batch':             128,
     'p0_lr':                1e-3,
@@ -129,10 +129,11 @@ CFG = {
     'eval_data_path':       'arc_data/re-arc/arc_original/evaluation',
     'val_batch_size':       10,
 
-    # Resume — point at the exact checkpoint files to continue from
-    # Phase 0 is DONE (399 epochs). Point at its final checkpoint so the loop
-    # detects start_epoch > p0_epochs and skips straight to Phase 1.
-    'p0_resume_from': 'runs/FactorizedFPS-v3_2026-04-23_14-40-34/phase0/latest_checkpoint.pth',
+    # Resume — fresh run.
+    # ⚠️  patch_size changed 2→6: old v3 checkpoint (patch_size=2, Conv2d 10×2×2) is
+    # INCOMPATIBLE with new architecture (patch_size=6, Conv2d 10×6×6, 25 patches vs 225).
+    # Must start from scratch.
+    'p0_resume_from': None,
     # Phase 1 is fresh
     'p1_resume_from': None,
 }
