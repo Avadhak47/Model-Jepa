@@ -122,9 +122,10 @@ CFG = {
     'val_batch_size':       8,
 
     # Resume — point at the exact checkpoint files to continue from
-    # Phase 0 finished 300 epochs; resume to push it to 399
-    'p0_resume_from': 'runs/FactorizedFPS-v3_2026-04-23_14-01-30/phase0/latest_checkpoint.pth',
-    # Phase 1 is fresh (OOM crash before any progress)
+    # Phase 0 is DONE (399 epochs). Point at its final checkpoint so the loop
+    # detects start_epoch > p0_epochs and skips straight to Phase 1.
+    'p0_resume_from': 'runs/FactorizedFPS-v3_2026-04-23_14-40-34/phase0/latest_checkpoint.pth',
+    # Phase 1 is fresh
     'p1_resume_from': None,
 }
 

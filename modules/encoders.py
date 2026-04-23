@@ -114,7 +114,33 @@ class DeepTransformerEncoder(TransformerEncoder):
             batch_first=True, norm_first=True
         )
         self.transformer = torch.nn.TransformerEncoder(enc_layer, num_layers=cfg['_enc_depth'], enable_nested_tensor=False)
+        self.vocab_size = cfg.get('vocab_size', 10)
         self.to(self.device)
+
+    def forward(self, inputs: dict) -> dict:
+        """Convert raw integer grid [B, 1, H, W] → One-Hot [B, 10, H, W] before patch_embed."""
+        img = inputs["state"].float().to(self.device)
+        if img.dim() == 3:
+            img = img.unsqueeze(0)  # [B, H, W] → [B, 1, H, W]
+
+        # One-Hot encode: [B, 1, H, W] int → [B, vocab_size, H, W] float
+        img_long = img.long().squeeze(1)                                           # [B, H, W]
+        img_onehot = torch.nn.functional.one_hot(
+            img_long, num_classes=self.vocab_size
+        ).permute(0, 3, 1, 2).float()                                              # [B, 10, H, W]
+
+        x = self.patch_embed(img_onehot)           # [B, embed_dim, H', W']
+        x = x.flatten(2).transpose(1, 2)           # [B, N, embed_dim]
+
+        B = x.shape[0]
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+
+        x = self.transformer(x)
+        cls_out = x[:, 0]
+        z = self.projector(cls_out)
+        return {"latent": z}
+
 
 class PatchTransformerEncoder(BaseEncoder):
     """
