@@ -589,9 +589,34 @@ def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset):
 # ═══════════════════════════════════════════════════════════════════════════
 # ENTRY POINT — FULL PIPELINE
 # ═══════════════════════════════════════════════════════════════════════════
+def check_gpu_memory(min_free_gb: float = 4.0):
+    """
+    Warn if GPU free memory is below threshold.
+    Prints nvidia-smi process table so you know what to kill.
+    """
+    if not torch.cuda.is_available():
+        return
+    free_bytes, total_bytes = torch.cuda.mem_get_info()
+    free_gb  = free_bytes  / 1024**3
+    total_gb = total_bytes / 1024**3
+    used_gb  = total_gb - free_gb
+    print(f"🎮 GPU: {torch.cuda.get_device_name(0)}")
+    print(f"   Total: {total_gb:.1f} GB | Used: {used_gb:.1f} GB | Free: {free_gb:.1f} GB")
+    if free_gb < min_free_gb:
+        print(f"\n⚠️  WARNING: Only {free_gb:.1f} GB free — need at least {min_free_gb:.1f} GB.")
+        print("   A previous process may still be holding GPU memory.")
+        print("   Run the following to identify and kill it:")
+        print("     nvidia-smi           # find the PID column")
+        print("     kill -9 <PID>        # kill the zombie process")
+        print("   Then re-run this script.\n")
+        # Still continue — expandable_segments may handle it, or user ignored warning intentionally
+
+
 def main(cfg: dict):
     device = cfg['device']
+    check_gpu_memory(min_free_gb=4.0)
     print(f"🖥️  Device: {device}")
+
 
     root_dir, p0_dir, p1_dir = make_run_dir(cfg)
 
