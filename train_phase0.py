@@ -83,7 +83,15 @@ CFG = {
     'focal_gamma':          2.0,
     'num_slots':            10,
     'slot_iters':           3,
-    'slot_temperature':     0.1,
+    # Slot attention temperature schedule:
+    #   Epoch 1 → slot_temp_start (high = soft/exploratory, all slots get gradient)
+    #   Epoch slot_temp_anneal → slot_temp_end (low = sharp/specialised)
+    # This prevents lost slots from being starved of gradient early,
+    # while still converging to clean object-level assignments later.
+    'slot_temperature':     0.1,      # fallback if annealing is disabled
+    'slot_temp_start':      1.0,      # initial temperature  (exploration phase)
+    'slot_temp_end':        0.1,      # final temperature    (exploitation phase)
+    'slot_temp_anneal':     300,      # epochs over which to linearly anneal
 
     # Phase 0 training
     'p0_epochs':            399,   # Resume adds 99 more epochs on top of the 300 already done
@@ -433,6 +441,12 @@ def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset, s
         slot_enc.train(); slot_dec.train()
         base_enc.train(); base_dec.train()
 
+        # ── Temperature annealing schedule ────────────────────────────────
+        # Linear interpolation from slot_temp_start → slot_temp_end over
+        # slot_temp_anneal epochs.  After that epoch, temperature is fixed at end.
+        t = min(1.0, (epoch - 1) / max(1, cfg['slot_temp_anneal']))
+        current_temp = cfg['slot_temp_start'] * (1.0 - t) + cfg['slot_temp_end'] * t
+
         ep_stot, ep_srecon, ep_svic, ep_brecon = [], [], [], []
         nan_streak = 0
 
@@ -441,7 +455,8 @@ def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset, s
             states = batch['state'].to(device)
 
             # ── Slotted model step ────────────────────────────────────────
-            z_slot = slot_enc({'state': states})
+            # Pass annealed temperature so attention sharpness scales with training maturity
+            z_slot = slot_enc({'state': states}, temperature=current_temp)
             out_slot = slot_dec({'latent': z_slot['latent']})
             loss_slot = slot_dec.loss({'state': states, 'latent': z_slot['latent']}, out_slot)
 
@@ -490,6 +505,7 @@ def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset, s
             'P1_Slot/Recon':    avg_srecon,
             'P1_Slot/VICReg':   avg_svic,
             'P1_Base/Recon':    avg_brecon,
+            'P1_Slot/Temperature': current_temp,  # track annealing progress
         }, step=step_offset + epoch, log_path=metrics_path)
 
         # ── Validation + Visualization Block ─────────────────────────────
@@ -527,7 +543,7 @@ def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset, s
             with torch.no_grad():
                 val_batch  = eval_dataset.sample(4)
                 val_states = val_batch['state'].to(device)
-                z_val = slot_enc({'state': val_states})
+                z_val = slot_enc({'state': val_states}, temperature=cfg['slot_temp_end'])
                 out_val = slot_dec({'latent': z_val['latent']})
 
                 recon_logits = out_val.get('reconstruction', out_val.get('reconstructed_logits'))

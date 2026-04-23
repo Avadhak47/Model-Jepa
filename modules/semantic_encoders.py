@@ -118,52 +118,73 @@ class SemanticSlotEncoder(nn.Module):
         self.to(self.device)
 
     def inject_semantic_priors(self, fps_slots):
-        """Called between Phase 0 and Phase 1 to inject sampled Codebook modes!"""
-        # fps_slots is [1, num_slots, embed_dim]
-        self.semantic_priors = nn.Parameter(fps_slots.to(self.device), requires_grad=False)
+        """
+        Called between Phase 0 and Phase 1 to inject sampled Codebook modes.
+        fps_slots: [1, num_slots, embed_dim]
 
-    def forward(self, inputs):
+        Design: keeps the FPS vector frozen as a semantic anchor, but registers
+        a learnable `prior_delta` (initialised to zero) on top of it.
+        - At epoch 0: delta=0, so initialisation is identical to pure FPS.
+        - With gradient flow: delta sculpts each slot's starting position toward
+          the clusters its patches actually live in, without disrupting the
+          codebook-derived semantic meaning of the base prior.
+        """
+        self.semantic_priors = nn.Parameter(fps_slots.to(self.device), requires_grad=False)
+        # Learnable offset — zero-initialised so it doesn't change anything on day 1
+        self.prior_delta = nn.Parameter(
+            torch.zeros_like(fps_slots, device=self.device), requires_grad=True
+        )
+
+    def forward(self, inputs, temperature: float = None):
         img = inputs["state"].float().to(self.device) # [B, 1, H, W]
         B, _, H, W = img.shape
-        
+
+        # Use externally-annealed temperature if provided, else use self.temperature
+        temp = temperature if temperature is not None else self.temperature
+
         # 1. Sobel Edges (pad to keep same H,W)
         padded_img = F.pad(img, (1, 1, 1, 1), mode='replicate')
         sx = F.conv2d(padded_img, self.sobel_x)
         sy = F.conv2d(padded_img, self.sobel_y)
-        
+
         # 2. One-Hot Colors
         onehot = F.one_hot(img.long().squeeze(1), num_classes=self.vocab_size) # [B, H, W, 10]
         onehot = onehot.permute(0, 3, 1, 2).float() # [B, 10, H, W]
-        
+
         # Composite! [B, 12, H, W]
         comp_img = torch.cat([onehot, sx, sy], dim=1)
-        
+
         # 3. Patching
         x = self.patch_embed(comp_img) # [B, embed_dim, 15, 15]
         x = x.flatten(2).transpose(1, 2) # [B, 225, embed_dim]
-        
+
         # Patch Self-Attention with 2D RoPE
         x = self.patch_mlp(x)
         x = x + self.patch_rope_attn(x)
         x = self.norm_inputs(x)
-        
+
         k, v = self.k_proj(x), self.v_proj(x)
-        
-        # Semantic Slot Initialization
-        slots = self.semantic_priors.expand(B, -1, -1)
-            
+
+        # Semantic Slot Initialization:
+        # base (frozen FPS anchor) + delta (learnable sculpting offset, starts at 0)
+        slots = (self.semantic_priors + self.prior_delta).expand(B, -1, -1)
+
         for _ in range(self.slot_iters):
             slots_prev = slots
             slots_norm = self.norm_slots(slots)
             q = self.q_proj(slots_norm)
 
             attn_logits = torch.bmm(k, q.transpose(1, 2)) * (self.embed_dim ** -0.5)
-            attn = F.softmax(attn_logits / self.temperature, dim=-1)
+            # Divide by temperature: high temp → soft (exploratory), low → sharp (specialised)
+            attn = F.softmax(attn_logits / temp, dim=-1)
             attn_norm = attn + 1e-8
             attn_norm = attn_norm / attn_norm.sum(dim=1, keepdim=True)
 
             updates = torch.bmm(attn_norm.transpose(1, 2), v)
-            slots = self.gru(updates.reshape(-1, self.embed_dim), slots_prev.reshape(-1, self.embed_dim)).reshape(B, self.num_slots, self.embed_dim)
+            slots = self.gru(
+                updates.reshape(-1, self.embed_dim),
+                slots_prev.reshape(-1, self.embed_dim)
+            ).reshape(B, self.num_slots, self.embed_dim)
             slots = slots + self.slot_mlp(self.norm_mlp(slots))
 
         masks = attn.transpose(1, 2).view(B, self.num_slots, self.grid_size, self.grid_size).detach()

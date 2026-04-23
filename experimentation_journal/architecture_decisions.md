@@ -149,3 +149,23 @@
 - **Change**: Added `valid_mask` parameter to `FactorizedVectorQuantizer.forward()`, `_quantize()`, and `resurrect_dead_codes()`. The notebook now computes `compute_valid_patch_mask()` using `torch.unfold` to identify which 2x2 patches contain real pixel content vs zero-padding.
 - **Rationale**: Research (CVQ-VAE, emergentmind.com) confirms that padding zeros fed into a VQ quantizer cause a single "zero-representing codeword" to dominate argmin competition. This skews the codebook frequency distribution, artificially suppresses Shannon Entropy, and causes perplexity to report falsely low values. Additionally, the dead code surgery was sampling randomly from a pool that was 90% padding vectors — which meant 135 of every 150 resurrected codes were immediately seeded with identical zero representations and died within one epoch.
 - **Expected Behaviour**: Perplexity is now calculated exclusively over real content patches, giving a true reading. Surgery candidates are drawn exclusively from real content patches, ensuring resurrected codes immediately converge onto distinct geometric structures rather than re-dying.
+
+## 2️⃣3️⃣ Learnable `prior_delta` + Temperature Annealing for Slot Initialization – *Why?*
+
+- **Change**: `SemanticSlotEncoder` now registers a learnable `prior_delta` tensor (zero-initialised, `requires_grad=True`) that is added to the frozen FPS semantic priors before each forward pass. The slot attention temperature is linearly annealed from `slot_temp_start=1.0` → `slot_temp_end=0.1` over `slot_temp_anneal=300` epochs. The annealed temperature is passed explicitly into `SemanticSlotEncoder.forward()` as an argument.
+
+- **Root Cause Diagnosed**: Phase 1 training plateaued at Slot Recon ≈ 5 (while the baseline reached 0.22) due to a **slot cold-start problem**:
+  1. Frozen FPS priors give every forward pass the **same 10 fixed starting vectors**, regardless of whether the current batch's patches are in a compatible part of the latent space.
+  2. When a slot prior is geometrically far from the patch clusters it should attend to, the attention logits `K @ q_s^T` are uniformly small. Softmax of uniform inputs produces near-uniform weights (≈1/225 per patch), minimising the gradient `∂α_s/∂q_s ≈ α_s(1−α_s)K`. This gradient points toward the **mean of all patches** — a blurry average — rather than toward any specific semantic cluster, meaning the slot drifts into useless territory rather than recovering.
+  3. At temperature T=0.1, attention is highly competitive (winner-take-all). 2–3 dominant slots capture large uniform background regions in every batch. The remaining slots receive near-zero alpha and near-zero decoder gradient — creating a dead-slot problem structurally identical to VQ codebook collapse.
+
+- **Why `prior_delta` over unfreezing outright**:
+  - Simply calling `requires_grad_(True)` on the base prior causes the gradient to push the frozen anchor itself, which can destroy its codebook-anchored semantic meaning accumulated over 400 epochs of Phase 0.
+  - `prior_delta` preserves the FPS structure as a gravitational anchor while allowing fine-grained positional sculpting. Its zero initialisation means the model is unaffected on Day 1 — it only deviates as the training loss demands.
+
+- **Why temperature annealing over fixed T=0.1**:
+  - At high temperature (T=1.0): `softmax(logits / 1.0)` is soft → all slots receive gradient from many patches → no slot is starved → `prior_delta` learns useful directions for every prototype.
+  - At low temperature (T=0.1): `softmax(logits / 0.1)` is sharp → winner-take-all slot assignment → clean object-separated reconstructions.
+  - Linear annealing over 300 epochs means slots are fully exploratory when their `prior_delta` is near zero (and needs strong gradient to move), then sharpening into specialists once they've found their semantic territory.
+
+- **Expected Behaviour**: Slot reconstruction loss should break through the ≈5 plateau by epoch ~100–150, with Slot Val Acc crossing 85%+ by epoch 300. The temperature trace in WandB (`P1_Slot/Temperature`) should show a clean linear decay from 1.0 to 0.1.
