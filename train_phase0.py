@@ -362,13 +362,14 @@ def train_phase_0(cfg, p0_dir, wb_run, dataset):
     del model          # Free encoder + decoder weights from GPU now, not at GC whim
     torch.save(frozen_vq.state_dict(), vq_path)
     print(f"\n💾 Frozen VQ codebook → {vq_path}")
-    return frozen_vq, vq_path
+    return frozen_vq, vq_path, epoch   # ← return final epoch for WandB offset
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PHASE 1 — SLOTTED JEPA + BASELINE COMPARISON
 # ═══════════════════════════════════════════════════════════════════════════
-def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset):
+def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset, step_offset: int = 0):
+    """Phase 1 Slotted JEPA training. step_offset = last Phase 0 epoch so WandB steps are monotonic."""
     global _STOP
     device = cfg['device']
 
@@ -489,7 +490,7 @@ def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset):
             'P1_Slot/Recon':    avg_srecon,
             'P1_Slot/VICReg':   avg_svic,
             'P1_Base/Recon':    avg_brecon,
-        }, step=epoch + 100, log_path=metrics_path)
+        }, step=step_offset + epoch, log_path=metrics_path)
 
         # ── Validation + Visualization Block ─────────────────────────────
         if epoch % cfg['p1_val_interval'] == 0 or epoch == 1:
@@ -520,7 +521,7 @@ def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset):
                 'Val_Base/Perfect':    b_val_perf * 100,
                 'Val_Slot/Loss':       s_val_loss,
                 'Val_Base/Loss':       b_val_loss,
-            }, step=epoch + 100, log_path=metrics_path)
+            }, step=step_offset + epoch, log_path=metrics_path)
 
             # Visualization: slot reconstruction + masks
             with torch.no_grad():
@@ -546,11 +547,11 @@ def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset):
                     plot_slot_masks(masks.cpu(), epoch, mask_path)
                     if WANDB_AVAILABLE and wb_run is not None:
                         wb_run.log({'Visuals/Slot_Masks': wandb.Image(mask_path)},
-                                   step=epoch + 100)
+                                   step=step_offset + epoch)
 
                 if WANDB_AVAILABLE and wb_run is not None:
                     wb_run.log({'Visuals/Slot_Reconstruction': wandb.Image(viz_path)},
-                               step=epoch + 100)
+                               step=step_offset + epoch)
 
             slot_enc.train(); slot_dec.train()
             base_enc.train(); base_dec.train()
@@ -573,7 +574,7 @@ def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset):
 
             # WandB artifact every 100 epochs
             if WANDB_AVAILABLE and wb_run is not None and epoch % 100 == 0:
-                art = wandb.Artifact(f'slotted_model_ep{epoch}', type='model')
+                art = wandb.Artifact(f'slotted_model_ep{step_offset + epoch}', type='model')
                 art.add_file(ckpt_path)
                 wb_run.log_artifact(art)
 
@@ -632,7 +633,7 @@ def main(cfg: dict):
     wb_run = init_wandb(cfg, root_dir, 'Phase0+1')
 
     # ── Phase 0 ─────────────────────────────────────────────────────────────
-    frozen_vq, _ = train_phase_0(cfg, p0_dir, wb_run, train_dataset)
+    frozen_vq, _, p0_last_epoch = train_phase_0(cfg, p0_dir, wb_run, train_dataset)
 
     if _STOP:
         print("\n🛑 Stop requested during Phase 0 — skipping Phase 1.")
@@ -653,7 +654,8 @@ def main(cfg: dict):
     frozen_vq = frozen_vq.to(device)  # Move back for FPS sampling
 
     # ── Phase 1 ─────────────────────────────────────────────────────────────
-    train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset)
+    train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset,
+                  step_offset=p0_last_epoch)  # Phase 1 steps are monotonic after Phase 0
 
     if wb_run:
         wb_run.finish()
