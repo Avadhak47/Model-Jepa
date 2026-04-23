@@ -162,13 +162,15 @@ class FactorizedVectorQuantizer(nn.Module):
         return semantic_slots.unsqueeze(0) # [1, 10, 128]
 
     @torch.no_grad()
-    def resurrect_dead_codes(self, inputs, valid_mask=None):
+    def resurrect_dead_codes(self, inputs, valid_mask=None, aggression_quantile=0.25):
         """
-        Teleports dead vectors directly into highly active REAL content clusters.
-        
-        valid_mask: Optional bool tensor [B, N] — when provided, pads are excluded
-                    from the surgery candidate pool so dead codes are never seeded with
-                    zero-padding representations (which would die again immediately).
+        Gently resurrects underutilized codes using a soft quantile threshold.
+        Only the BOTTOM 25% by usage count are replaced — prevents 150 simultaneous
+        destabilizing injections that cause escalating VQ Loss spikes.
+
+        valid_mask: Optional bool tensor [B, N] — filters out zero-padding patches
+                    from the surgery pool so dead codes are seeded with real content.
+        aggression_quantile: Fraction of codebook to replace per surgery call (default 0.25).
         """
         is_spatial = inputs.dim() == 4
         if is_spatial:
@@ -183,39 +185,38 @@ class FactorizedVectorQuantizer(nn.Module):
             flat_valid = valid_mask.view(-1)
             real_flat = flat_input[flat_valid]
             if real_flat.size(0) == 0:
-                # Safety fallback: if no real patches (shouldn't happen), skip surgery
                 self.shape_usage.zero_()
                 self.color_usage.zero_()
-                return
+                return 0, 0
         else:
             real_flat = flat_input
             
         real_shape = real_flat[:, :self.half_dim]
         real_color = real_flat[:, self.half_dim:]
-
         n_real = real_shape.size(0)
-        
-        # Check Shape Codebook — sample ONLY from real content patches
-        dead_shape_mask = self.shape_usage == 0
+
+        # --- Shape Codebook Surgery ---
+        # Only replace bottom aggression_quantile of codes by usage frequency
+        shape_threshold = torch.quantile(self.shape_usage.float(), aggression_quantile)
+        dead_shape_mask = self.shape_usage <= shape_threshold
         num_dead_shapes = dead_shape_mask.sum().item()
         if num_dead_shapes > 0:
             rand_indices = torch.randint(0, n_real, (num_dead_shapes,), device=inputs.device)
             self.embedding_shape.weight.data[dead_shape_mask] = \
                 real_shape[rand_indices].clone().to(self.embedding_shape.weight.dtype)
             
-        # Check Color Codebook — same filtered pool
-        dead_color_mask = self.color_usage == 0
+        # --- Color Codebook Surgery ---
+        color_threshold = torch.quantile(self.color_usage.float(), aggression_quantile)
+        dead_color_mask = self.color_usage <= color_threshold
         num_dead_colors = dead_color_mask.sum().item()
         if num_dead_colors > 0:
             rand_indices = torch.randint(0, n_real, (num_dead_colors,), device=inputs.device)
             self.embedding_color.weight.data[dead_color_mask] = \
                 real_color[rand_indices].clone().to(self.embedding_color.weight.dtype)
             
-        n_resurrected_shapes = num_dead_shapes
-        n_resurrected_colors = num_dead_colors
-        
         # Reset counters for the next interval
         self.shape_usage.zero_()
         self.color_usage.zero_()
         
-        return n_resurrected_shapes, n_resurrected_colors
+        return int(num_dead_shapes), int(num_dead_colors)
+
