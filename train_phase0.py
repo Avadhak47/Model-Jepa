@@ -5,6 +5,10 @@ Run this directly on the server instead of Jupyter to avoid kernel crashes:
 
     python train_phase0.py
 
+All outputs (checkpoints, metrics log, frozen VQ) are written to:
+    runs/<run_name>/
+This folder is .gitignored so nothing leaks into version control.
+
 Features:
 - NaN guard: skips corrupt batches instead of crashing the whole run
 - LR warmup after surgery: prevents gradient explosion from sudden code teleportation
@@ -20,6 +24,7 @@ import os
 import signal
 import json
 import time
+import datetime
 import torch
 import torch.nn as nn
 import numpy as np
@@ -68,12 +73,11 @@ CFG = {
     # Surgery schedule
     'surgery_interval': 25,       # Every N epochs
     'surgery_quantile': 0.25,     # Replace bottom 25% by usage (not all dead)
-    # Checkpointing
-    'checkpoint_path':  'latest_phase0_checkpoint.pth',
+    # Checkpointing & output directory
+    'run_name':         'Phase0-Stable-v3',   # Also used as WandB run name
     'save_interval':    10,
     # WandB
     'wandb_project':    'NS-ARC-Scaling',
-    'wandb_run_name':   'Phase0-Stable-v3',
     # Data
     'data_path':        'arc_data/re-arc',
     # Early stop thresholds
@@ -126,11 +130,11 @@ def set_lr(optimizer, lr: float):
         g['lr'] = lr
 
 
-def log_metrics(wb_run, metrics: dict, step: int):
-    """Log to WandB if available, always append to local JSONL."""
+def log_metrics(wb_run, metrics: dict, step: int, metrics_path: str):
+    """Log to WandB if available, always append to local JSONL inside run dir."""
     if WANDB_AVAILABLE and wb_run is not None:
         wb_run.log(metrics, step=step)
-    with open('metrics_log.jsonl', 'a') as f:
+    with open(metrics_path, 'a') as f:
         f.write(json.dumps({'step': step, **metrics}) + '\n')
 
 
@@ -151,10 +155,33 @@ signal.signal(signal.SIGTERM, _signal_handler)
 # ═══════════════════════════════════════════════════════════════════════════
 # TRAINING LOOP
 # ═══════════════════════════════════════════════════════════════════════════
+def make_run_dir(cfg: dict) -> str:
+    """
+    Creates and returns a timestamped run directory under runs/.
+    Example: runs/Phase0-Stable-v3_2024-04-23_13-45-00/
+    All checkpoints, logs, and artifacts are saved here.
+    This directory is .gitignored.
+    """
+    timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    run_dir = os.path.join('runs', f"{cfg['run_name']}_{timestamp}")
+    os.makedirs(run_dir, exist_ok=True)
+    # Write the config for reproducibility
+    with open(os.path.join(run_dir, 'config.json'), 'w') as f:
+        json.dump(cfg, f, indent=2)
+    print(f"📂 Run directory: {run_dir}")
+    return run_dir
+
+
 def train(cfg: dict):
     global _STOP_REQUESTED
 
-    device = cfg['device']
+    device  = cfg['device']
+    run_dir = make_run_dir(cfg)
+
+    checkpoint_path  = os.path.join(run_dir, 'latest_phase0_checkpoint.pth')
+    frozen_vq_path   = os.path.join(run_dir, 'frozen_vq_codebook.pth')
+    metrics_log_path = os.path.join(run_dir, 'metrics_log.jsonl')
+
     print(f"🖥️  Device: {device}")
     print(f"🔧 Config: epochs={cfg['epochs']}, batch={cfg['batch_size']}, "
           f"surgery every {cfg['surgery_interval']} epochs\n")
@@ -169,10 +196,12 @@ def train(cfg: dict):
     start_epoch       = 1
     post_surgery_cd   = 0   # Countdown for post-surgery LR warmup
 
-    # ── Resume checkpoint ───────────────────────────────────────────────────
-    if os.path.exists(cfg['checkpoint_path']):
-        print(f"📥 Resuming from {cfg['checkpoint_path']}...")
-        ckpt = torch.load(cfg['checkpoint_path'], map_location=device, weights_only=False)
+    # ── Resume checkpoint (look for latest in runs/ or the explicit path) ──
+    # If a specific checkpoint path was passed in cfg, use that; otherwise skip resume
+    resume_path = cfg.get('resume_from', None)
+    if resume_path and os.path.exists(resume_path):
+        print(f"📥 Resuming from {resume_path}...")
+        ckpt = torch.load(resume_path, map_location=device, weights_only=False)
         try:
             model.load_state_dict(ckpt['model'], strict=False)
             opt.load_state_dict(ckpt['opt'])
@@ -186,13 +215,17 @@ def train(cfg: dict):
     if WANDB_AVAILABLE:
         api_key = os.environ.get('WANDB_API_KEY')
         if api_key:
-            wandb.login(key=api_key)
+            try:
+                wandb.login(key=api_key)
+            except Exception as e:
+                print(f"⚠️  WandB init failed ({e}), proceeding offline.")
         try:
             wb_run = wandb.init(
                 project=cfg['wandb_project'],
-                name=cfg['wandb_run_name'],
+                name=cfg['run_name'],
                 config=cfg,
                 resume='allow',
+                dir=run_dir,   # Keep wandb local cache inside run dir
             )
         except Exception as e:
             print(f"⚠️  WandB init failed ({e}), proceeding offline.")
@@ -261,7 +294,7 @@ def train(cfg: dict):
                 'P0/Perplexity_Shape_256':  avg_p_shape,
                 'P0/Perplexity_Color_16':   avg_p_color,
                 'P0/LR':                    current_lr,
-            }, step=epoch)
+            }, step=epoch, metrics_path=metrics_log_path)
 
             if epoch % cfg['save_interval'] == 0 or _STOP_REQUESTED:
                 print(f"Epoch {epoch:03d} | Recon: {avg_recon:.4f} | VQ: {avg_vq:.4f} "
@@ -290,7 +323,7 @@ def train(cfg: dict):
                     'opt':   opt.state_dict(),
                     'epoch': epoch,
                     'cfg':   cfg,
-                }, cfg['checkpoint_path'])
+                }, checkpoint_path)
 
             # ── Early Stop ─────────────────────────────────────────────────
             if (avg_p_shape > cfg['stop_perp_shape']
@@ -309,15 +342,16 @@ def train(cfg: dict):
         wb_run.finish()
 
     print("\n🏁 Phase 0 Training Complete.")
-    print(f"   Final checkpoint: {cfg['checkpoint_path']}")
-    return model.vq
+    print(f"   Final checkpoint: {checkpoint_path}")
+    print(f"   Metrics log:      {metrics_log_path}")
+    return model.vq, frozen_vq_path
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════
 if __name__ == '__main__':
-    frozen_vq = train(CFG)
-    # Save the frozen VQ separately for Phase 1 FPS injection
-    torch.save(frozen_vq.state_dict(), 'frozen_vq_codebook.pth')
-    print("💾 Frozen VQ codebook saved to frozen_vq_codebook.pth")
+    frozen_vq, frozen_vq_path = train(CFG)
+    # Save the frozen VQ inside the run directory for Phase 1 FPS injection
+    torch.save(frozen_vq.state_dict(), frozen_vq_path)
+    print(f"💾 Frozen VQ codebook saved to {frozen_vq_path}")

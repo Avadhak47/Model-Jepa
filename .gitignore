@@ -32,3 +32,6 @@ data/arc-agi/
 .DS_Store
 *.log
 extract.py
+
+# Training run artifacts (logs, checkpoints, plots)
+runs/
