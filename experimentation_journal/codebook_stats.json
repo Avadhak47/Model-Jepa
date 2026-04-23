@@ -1,0 +1,1922 @@
+{
+  "fps_shape_codes": [
+    115,
+    133,
+    134,
+    209,
+    219,
+    253,
+    188,
+    57,
+    144,
+    75
+  ],
+  "shape_codebook": [
+    {
+      "code": 0,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 1,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 2,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 3,
+      "hits": 472,
+      "dominant_color": 1,
+      "entropy": 1.3706420411233369,
+      "edge_mag": 1.7123217994225577
+    },
+    {
+      "code": 4,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 5,
+      "hits": 5,
+      "dominant_color": 0,
+      "entropy": 1.4714568590205168,
+      "edge_mag": 1.6655179071058897
+    },
+    {
+      "code": 6,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 7,
+      "hits": 66,
+      "dominant_color": 0,
+      "entropy": 1.5111328166871096,
+      "edge_mag": 1.9983901180043677
+    },
+    {
+      "code": 8,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 9,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 10,
+      "hits": 202,
+      "dominant_color": 0,
+      "entropy": 1.298490758834419,
+      "edge_mag": 1.9280450222675771
+    },
+    {
+      "code": 11,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 12,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 13,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 14,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 15,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 16,
+      "hits": 17,
+      "dominant_color": 5,
+      "entropy": 0.8378425438850301,
+      "edge_mag": 1.9500135448218965
+    },
+    {
+      "code": 17,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 18,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 19,
+      "hits": 2180,
+      "dominant_color": 0,
+      "entropy": 1.9458521202030614,
+      "edge_mag": 2.2284591028980762
+    },
+    {
+      "code": 20,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 21,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 22,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 23,
+      "hits": 5146,
+      "dominant_color": 6,
+      "entropy": 1.2380440415832719,
+      "edge_mag": 1.7490108084723996
+    },
+    {
+      "code": 24,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 25,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 26,
+      "hits": 281,
+      "dominant_color": 4,
+      "entropy": 1.7157425328247151,
+      "edge_mag": 1.489900142141177
+    },
+    {
+      "code": 27,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 28,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 29,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 30,
+      "hits": 952,
+      "dominant_color": 5,
+      "entropy": 1.2402643219487053,
+      "edge_mag": 1.7178626915108182
+    },
+    {
+      "code": 31,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 32,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 33,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 34,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 35,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 36,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 37,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 38,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 39,
+      "hits": 52,
+      "dominant_color": 6,
+      "entropy": 1.3707245780095978,
+      "edge_mag": 1.7280981579136137
+    },
+    {
+      "code": 40,
+      "hits": 1,
+      "dominant_color": 0,
+      "entropy": 0.12693054514140226,
+      "edge_mag": 0.8216777476527245
+    },
+    {
+      "code": 41,
+      "hits": 1,
+      "dominant_color": 0,
+      "entropy": 0.5297061988576545,
+      "edge_mag": 2.078698548207745
+    },
+    {
+      "code": 42,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 43,
+      "hits": 2,
+      "dominant_color": 6,
+      "entropy": 0.7992354706973047,
+      "edge_mag": 0.8031388182698617
+    },
+    {
+      "code": 44,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 45,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 46,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 47,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 48,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 49,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 50,
+      "hits": 13,
+      "dominant_color": 4,
+      "entropy": 1.156389866298782,
+      "edge_mag": 1.54993519925041
+    },
+    {
+      "code": 51,
+      "hits": 15,
+      "dominant_color": 9,
+      "entropy": 1.3136089196929717,
+      "edge_mag": 2.3695687654532214
+    },
+    {
+      "code": 52,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 53,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 54,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 55,
+      "hits": 73,
+      "dominant_color": 4,
+      "entropy": 1.0165227055821762,
+      "edge_mag": 1.5513964503985176
+    },
+    {
+      "code": 56,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 57,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 58,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 59,
+      "hits": 332,
+      "dominant_color": 8,
+      "entropy": 1.6335907293413072,
+      "edge_mag": 2.968548358419188
+    },
+    {
+      "code": 60,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 61,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 62,
+      "hits": 916,
+      "dominant_color": 4,
+      "entropy": 1.3050533738723038,
+      "edge_mag": 1.2653795042494582
+    },
+    {
+      "code": 63,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 64,
+      "hits": 131,
+      "dominant_color": 7,
+      "entropy": 1.5014521701155386,
+      "edge_mag": 1.6575327455933477
+    },
+    {
+      "code": 65,
+      "hits": 35752,
+      "dominant_color": 0,
+      "entropy": 1.6459403150426974,
+      "edge_mag": 1.8435930931005526
+    },
+    {
+      "code": 66,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 67,
+      "hits": 2,
+      "dominant_color": 0,
+      "entropy": 0.12693054514140226,
+      "edge_mag": 0.4930066485916347
+    },
+    {
+      "code": 68,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 69,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 70,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 71,
+      "hits": 495,
+      "dominant_color": 5,
+      "entropy": 1.6506051895012515,
+      "edge_mag": 1.8181784144042141
+    },
+    {
+      "code": 72,
+      "hits": 15,
+      "dominant_color": 0,
+      "entropy": 1.406302817829506,
+      "edge_mag": 2.2037132404072355
+    },
+    {
+      "code": 73,
+      "hits": 23,
+      "dominant_color": 1,
+      "entropy": 1.2543913567151774,
+      "edge_mag": 2.745826814182784
+    },
+    {
+      "code": 74,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 75,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 76,
+      "hits": 7,
+      "dominant_color": 6,
+      "entropy": 0.8744674938510656,
+      "edge_mag": 0.8191807723065209
+    },
+    {
+      "code": 77,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 78,
+      "hits": 128,
+      "dominant_color": 3,
+      "entropy": 1.7609526019087578,
+      "edge_mag": 2.092338070412037
+    },
+    {
+      "code": 79,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 80,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 81,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 82,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 83,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 84,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 85,
+      "hits": 1495,
+      "dominant_color": 9,
+      "entropy": 1.5330641258656916,
+      "edge_mag": 1.9309429034834964
+    },
+    {
+      "code": 86,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 87,
+      "hits": 1109,
+      "dominant_color": 4,
+      "entropy": 1.9271805267474782,
+      "edge_mag": 1.3370593430492799
+    },
+    {
+      "code": 88,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 89,
+      "hits": 5444,
+      "dominant_color": 6,
+      "entropy": 1.4924459024144816,
+      "edge_mag": 1.724100353853945
+    },
+    {
+      "code": 90,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 91,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 92,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 93,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 94,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 95,
+      "hits": 22,
+      "dominant_color": 2,
+      "entropy": 1.3183021530842114,
+      "edge_mag": 1.775926069157119
+    },
+    {
+      "code": 96,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 97,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 98,
+      "hits": 27,
+      "dominant_color": 6,
+      "entropy": 0.8866994352654034,
+      "edge_mag": 1.5137007309406523
+    },
+    {
+      "code": 99,
+      "hits": 6950,
+      "dominant_color": 3,
+      "entropy": 1.2217688947169139,
+      "edge_mag": 1.2215516289755977
+    },
+    {
+      "code": 100,
+      "hits": 393,
+      "dominant_color": 7,
+      "entropy": 1.5247342241061614,
+      "edge_mag": 2.285462744085173
+    },
+    {
+      "code": 101,
+      "hits": 1238,
+      "dominant_color": 6,
+      "entropy": 1.1982865786538959,
+      "edge_mag": 1.5830826976027161
+    },
+    {
+      "code": 102,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 103,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 104,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 105,
+      "hits": 5,
+      "dominant_color": 0,
+      "entropy": 0.17985822109880886,
+      "edge_mag": 1.0567075858609694
+    },
+    {
+      "code": 106,
+      "hits": 24,
+      "dominant_color": 6,
+      "entropy": 1.2250377702991895,
+      "edge_mag": 1.4819353912073217
+    },
+    {
+      "code": 107,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 108,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 109,
+      "hits": 55,
+      "dominant_color": 3,
+      "entropy": 0.6560637995892676,
+      "edge_mag": 0.5242834894744327
+    },
+    {
+      "code": 110,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 111,
+      "hits": 37,
+      "dominant_color": 7,
+      "entropy": 1.6412338586115574,
+      "edge_mag": 1.3330694779758203
+    },
+    {
+      "code": 112,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 113,
+      "hits": 33,
+      "dominant_color": 0,
+      "entropy": 1.4287736473439119,
+      "edge_mag": 1.5574067597801677
+    },
+    {
+      "code": 114,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 115,
+      "hits": 11,
+      "dominant_color": 5,
+      "entropy": 0.873201168658365,
+      "edge_mag": 1.613592618127626
+    },
+    {
+      "code": 116,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 117,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 118,
+      "hits": 2,
+      "dominant_color": 2,
+      "entropy": 0.6036372513003261,
+      "edge_mag": 3.165460279391379
+    },
+    {
+      "code": 119,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 120,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 121,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 122,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 123,
+      "hits": 14277,
+      "dominant_color": 5,
+      "entropy": 1.5701962277878658,
+      "edge_mag": 1.8475391306591262
+    },
+    {
+      "code": 124,
+      "hits": 148,
+      "dominant_color": 9,
+      "entropy": 1.2127559820105298,
+      "edge_mag": 3.2245611564217
+    },
+    {
+      "code": 125,
+      "hits": 6,
+      "dominant_color": 5,
+      "entropy": 0.8452529502052812,
+      "edge_mag": 1.3312778552852407
+    },
+    {
+      "code": 126,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 127,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 128,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 129,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 130,
+      "hits": 10,
+      "dominant_color": 2,
+      "entropy": 0.5934668678244202,
+      "edge_mag": 1.1363385552586291
+    },
+    {
+      "code": 131,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 132,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 133,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 134,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 135,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 136,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 137,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 138,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 139,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 140,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 141,
+      "hits": 1899,
+      "dominant_color": 7,
+      "entropy": 1.0846662930847315,
+      "edge_mag": 1.3165581392044
+    },
+    {
+      "code": 142,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 143,
+      "hits": 435,
+      "dominant_color": 1,
+      "entropy": 1.2417732480278005,
+      "edge_mag": 1.5328747028896068
+    },
+    {
+      "code": 144,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 145,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 146,
+      "hits": 4807,
+      "dominant_color": 8,
+      "entropy": 1.4999328977481354,
+      "edge_mag": 1.9304708593644304
+    },
+    {
+      "code": 147,
+      "hits": 228,
+      "dominant_color": 2,
+      "entropy": 1.1955606006981647,
+      "edge_mag": 0.8027780229334813
+    },
+    {
+      "code": 148,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 149,
+      "hits": 2621,
+      "dominant_color": 3,
+      "entropy": 1.800333916077653,
+      "edge_mag": 2.1557624143926706
+    },
+    {
+      "code": 150,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 151,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 152,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 153,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 154,
+      "hits": 419,
+      "dominant_color": 8,
+      "entropy": 1.1855754384433923,
+      "edge_mag": 2.088601423446951
+    },
+    {
+      "code": 155,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 156,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 157,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 158,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 159,
+      "hits": 43,
+      "dominant_color": 5,
+      "entropy": 0.8506187329721605,
+      "edge_mag": 1.1957383894357139
+    },
+    {
+      "code": 160,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 161,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 162,
+      "hits": 40,
+      "dominant_color": 8,
+      "entropy": 1.251310479370513,
+      "edge_mag": 2.308100818714005
+    },
+    {
+      "code": 163,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 164,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 165,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 166,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 167,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 168,
+      "hits": 36,
+      "dominant_color": 6,
+      "entropy": 0.6823836661293398,
+      "edge_mag": 0.9350056981723132
+    },
+    {
+      "code": 169,
+      "hits": 26,
+      "dominant_color": 4,
+      "entropy": 1.5614492842622918,
+      "edge_mag": 1.5822854512653808
+    },
+    {
+      "code": 170,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 171,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 172,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 173,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 174,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 175,
+      "hits": 242,
+      "dominant_color": 1,
+      "entropy": 1.2623597265645468,
+      "edge_mag": 1.6219252848470438
+    },
+    {
+      "code": 176,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 177,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 178,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 179,
+      "hits": 61,
+      "dominant_color": 5,
+      "entropy": 1.5313350932025958,
+      "edge_mag": 1.9705271552179702
+    },
+    {
+      "code": 180,
+      "hits": 8,
+      "dominant_color": 6,
+      "entropy": 1.4917098890697076,
+      "edge_mag": 1.444593113206816
+    },
+    {
+      "code": 181,
+      "hits": 16,
+      "dominant_color": 0,
+      "entropy": 0.6451848147187585,
+      "edge_mag": 1.0677042681658242
+    },
+    {
+      "code": 182,
+      "hits": 109,
+      "dominant_color": 8,
+      "entropy": 1.6108357898315016,
+      "edge_mag": 2.215866991764824
+    },
+    {
+      "code": 183,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 184,
+      "hits": 13,
+      "dominant_color": 8,
+      "entropy": 1.2101885628417561,
+      "edge_mag": 2.1417373683596583
+    },
+    {
+      "code": 185,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 186,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 187,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 188,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 189,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 190,
+      "hits": 2,
+      "dominant_color": 5,
+      "entropy": 0.8794643304304726,
+      "edge_mag": 1.6663551572173434
+    },
+    {
+      "code": 191,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 192,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 193,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 194,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 195,
+      "hits": 336,
+      "dominant_color": 2,
+      "entropy": 2.0584532142580976,
+      "edge_mag": 1.9455947945052974
+    },
+    {
+      "code": 196,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 197,
+      "hits": 138,
+      "dominant_color": 0,
+      "entropy": 1.6854769082021228,
+      "edge_mag": 2.5651088442198495
+    },
+    {
+      "code": 198,
+      "hits": 464,
+      "dominant_color": 6,
+      "entropy": 1.461114638340361,
+      "edge_mag": 2.4082062327986016
+    },
+    {
+      "code": 199,
+      "hits": 210,
+      "dominant_color": 7,
+      "entropy": 0.9693098355364989,
+      "edge_mag": 1.2076270020134472
+    },
+    {
+      "code": 200,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 201,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 202,
+      "hits": 46,
+      "dominant_color": 3,
+      "entropy": 0.8473135297846496,
+      "edge_mag": 0.8393410558853767
+    },
+    {
+      "code": 203,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 204,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 205,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 206,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 207,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 208,
+      "hits": 1132,
+      "dominant_color": 0,
+      "entropy": 1.9296018393631682,
+      "edge_mag": 2.6216669951571046
+    },
+    {
+      "code": 209,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 210,
+      "hits": 93,
+      "dominant_color": 3,
+      "entropy": 0.6708080893453661,
+      "edge_mag": 0.6103782519863608
+    },
+    {
+      "code": 211,
+      "hits": 4008,
+      "dominant_color": 8,
+      "entropy": 0.963448215079527,
+      "edge_mag": 1.713020465873165
+    },
+    {
+      "code": 212,
+      "hits": 14,
+      "dominant_color": 3,
+      "entropy": 0.39042163290472476,
+      "edge_mag": 0.18126379553912453
+    },
+    {
+      "code": 213,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 214,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 215,
+      "hits": 1,
+      "dominant_color": 0,
+      "entropy": 0.12693054514140226,
+      "edge_mag": 0.6573421981221794
+    },
+    {
+      "code": 216,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 217,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 218,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 219,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 220,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 221,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 222,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 223,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 224,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 225,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 226,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 227,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 228,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 229,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 230,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 231,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 232,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 233,
+      "hits": 368,
+      "dominant_color": 1,
+      "entropy": 1.6938659257024058,
+      "edge_mag": 1.9506112692750193
+    },
+    {
+      "code": 234,
+      "hits": 119,
+      "dominant_color": 0,
+      "entropy": 1.4840658400465396,
+      "edge_mag": 1.7360210277363113
+    },
+    {
+      "code": 235,
+      "hits": 53,
+      "dominant_color": 3,
+      "entropy": 0.9401931681656133,
+      "edge_mag": 1.1010908572268776
+    },
+    {
+      "code": 236,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 237,
+      "hits": 888,
+      "dominant_color": 2,
+      "entropy": 1.2645595890367176,
+      "edge_mag": 1.2695960050109651
+    },
+    {
+      "code": 238,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 239,
+      "hits": 19,
+      "dominant_color": 0,
+      "entropy": 1.1473274135255047,
+      "edge_mag": 1.1745058430097075
+    },
+    {
+      "code": 240,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 241,
+      "hits": 761,
+      "dominant_color": 2,
+      "entropy": 1.2524930558590466,
+      "edge_mag": 1.4653889075276048
+    },
+    {
+      "code": 242,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 243,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 244,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 245,
+      "hits": 3543,
+      "dominant_color": 7,
+      "entropy": 1.5031643906000247,
+      "edge_mag": 1.8219191374099013
+    },
+    {
+      "code": 246,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 247,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 248,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 249,
+      "hits": 7048,
+      "dominant_color": 1,
+      "entropy": 1.2323334080290735,
+      "edge_mag": 1.2228433274322381
+    },
+    {
+      "code": 250,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 251,
+      "hits": 131,
+      "dominant_color": 6,
+      "entropy": 1.0082912222052847,
+      "edge_mag": 0.9381083023496725
+    },
+    {
+      "code": 252,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 253,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 254,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 255,
+      "hits": 195,
+      "dominant_color": 3,
+      "entropy": 1.589139944576311,
+      "edge_mag": 2.245392641492025
+    }
+  ],
+  "color_codebook": [
+    {
+      "code": 0,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 1,
+      "hits": 73053,
+      "dominant_color": 0,
+      "entropy": 2.0576539151380975,
+      "edge_mag": 1.7186254512436607
+    },
+    {
+      "code": 2,
+      "hits": 161,
+      "dominant_color": 6,
+      "entropy": 1.271789584302551,
+      "edge_mag": 1.1576021130718506
+    },
+    {
+      "code": 3,
+      "hits": 32359,
+      "dominant_color": 0,
+      "entropy": 2.0946681109688257,
+      "edge_mag": 1.792523979828974
+    },
+    {
+      "code": 4,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 5,
+      "hits": 137,
+      "dominant_color": 1,
+      "entropy": 1.0748198432649185,
+      "edge_mag": 1.0702519508713524
+    },
+    {
+      "code": 6,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 7,
+      "hits": 91,
+      "dominant_color": 2,
+      "entropy": 2.0284096031534946,
+      "edge_mag": 2.6770044806235718
+    },
+    {
+      "code": 8,
+      "hits": 1,
+      "dominant_color": 0,
+      "entropy": 0.12693054514140226,
+      "edge_mag": 0.4930066485916347
+    },
+    {
+      "code": 9,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 10,
+      "hits": 2844,
+      "dominant_color": 7,
+      "entropy": 2.079552042095265,
+      "edge_mag": 2.1151094107774795
+    },
+    {
+      "code": 11,
+      "hits": 491,
+      "dominant_color": 0,
+      "entropy": 1.6078370648334974,
+      "edge_mag": 1.1738042376452704
+    },
+    {
+      "code": 12,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 13,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 14,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    },
+    {
+      "code": 15,
+      "hits": 0,
+      "dominant_color": -1,
+      "entropy": 0.0,
+      "edge_mag": 0.0
+    }
+  ]
+}

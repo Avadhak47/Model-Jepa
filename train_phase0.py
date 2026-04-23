@@ -75,14 +75,14 @@ CFG = {
     # Architecture
     'device':               'cuda' if torch.cuda.is_available() else 'cpu',
     'in_channels':          10,       # One-Hot encoded ARC colors
-    'patch_size':           6,
+    'patch_size':           5,
     'hidden_dim':           128,
     'latent_dim':           128,
     'vocab_size':           10,
     'grid_size':            30,
     'focal_gamma':          2.0,
-    'num_slots':            10,
-    'slot_iters':           5,
+    'num_slots':            16,
+    'slot_iters':           7,
     # Slot attention temperature schedule:
     #   Epoch 1 → slot_temp_start (high = soft/exploratory, all slots get gradient)
     #   Epoch slot_temp_anneal → slot_temp_end (low = sharp/specialised)
@@ -94,24 +94,24 @@ CFG = {
     'slot_temp_anneal':     300,      # epochs over which to linearly anneal
 
     # Phase 0 training
-    'p0_epochs':            300,   # Fresh run — patch_size=6 is incompatible with v3 checkpoint
+    'p0_epochs':            500,   # Fresh run — patch_size=6 is incompatible with v3 checkpoint
     'p0_steps':             100,
     'p0_batch':             128,
-    'p0_lr':                1e-3,
+    'p0_lr':                5e-4,
     'p0_lr_post_surgery':   1e-4,
     'p0_lr_warmup_epochs':  2,
-    'p0_grad_clip':         1.0,
+    'p0_grad_clip':         2.0,
     'p0_save_interval':     10,
 
     # Phase 0 codebook
-    'num_shape_codes':      256,
+    'num_shape_codes':      512,
     'num_color_codes':      16,
     'commitment_cost':      0.25,
     'surgery_interval':     25,
     'surgery_quantile':     0.15,
 
     # Phase 0 early stop
-    'p0_stop_perp_shape':   230.0,
+    'p0_stop_perp_shape':   460.0,
     'p0_stop_perp_color':   14.0,
     'p0_stop_recon':        0.05,
 

@@ -152,7 +152,7 @@ class PatchTransformerEncoder(BaseEncoder):
         # Using One-Hots instead of raw integers to avoid categorical magnitude bias
         self.in_channels = 10
         self.patch_size = config.get("patch_size", 2)
-        embed_dim = config.get("hidden_dim", 128)
+        embed_dim = config.get("hidden_dim", 512)
         self.latent_dim = config.get("latent_dim", 128)
         
         self.patch_embed = nn.Conv2d(self.in_channels, embed_dim, kernel_size=self.patch_size, stride=self.patch_size)
@@ -161,10 +161,10 @@ class PatchTransformerEncoder(BaseEncoder):
         self.pos_embed = nn.Parameter(torch.randn(1, 400, embed_dim)) 
         
         enc_layer = nn.TransformerEncoderLayer(
-            d_model=embed_dim, nhead=4, dim_feedforward=embed_dim*4,
+            d_model=embed_dim, nhead=8, dim_feedforward=embed_dim*4,
             batch_first=True, norm_first=True
         )
-        self.transformer = nn.TransformerEncoder(enc_layer, num_layers=2, enable_nested_tensor=False)
+        self.transformer = nn.TransformerEncoder(enc_layer, num_layers=6, enable_nested_tensor=False)
         
         self.projector = nn.Sequential(
             nn.LayerNorm(embed_dim),
