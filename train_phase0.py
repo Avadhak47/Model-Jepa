@@ -76,8 +76,9 @@ CFG = {
     'device':               'cuda' if torch.cuda.is_available() else 'cpu',
     'in_channels':          10,       # One-Hot encoded ARC colors
     'patch_size':           5,
-    'hidden_dim':           128,
-    'latent_dim':           128,
+    'hidden_dim':           256,
+    'latent_dim':           256,       # For VQ Shape + Color Factorization
+    'pose_dim':             64,        # Unquantized Equivariant Pose
     'vocab_size':           10,
     'grid_size':            30,
     'focal_gamma':          2.0,
@@ -117,16 +118,17 @@ CFG = {
 
     # Phase 1 training
     'p1_epochs':            1000,
-    'p1_steps':             200,
-    'p1_batch':             32,     # Reduced from 128 — SemanticDecoder spatial-broadcast is VRAM-heavy
-    'p1_lr':                1e-4,
+    'p1_steps':             100,
+    'p1_batch':             64,
+    'p1_lr':                4e-4,
     'p1_grad_clip':         1.0,
     'p1_save_interval':     10,
     'p1_val_interval':      10,     # Run validation every N epochs
 
-    # Data
-    'data_path':            'arc_data/re-arc',
-    'eval_data_path':       'arc_data/re-arc/arc_original/evaluation',
+    # Data paths
+    'data_path':            'arc_data/re-arc/tasks',
+    'arc_heavy_path':       'arc_data/arc-heavy/training',
+    'eval_data_path':       'arc_data/original/evaluation',
     'val_batch_size':       10,
 
     # Resume — fresh run.
@@ -233,11 +235,18 @@ class Phase0Autoencoder(nn.Module):
         self.decoder = PatchDecoder(cfg)
         self.to(cfg['device'])
 
-    def forward(self, inputs, valid_mask=None):
-        z = self.encoder(inputs)['latent']
-        z_q, vq_loss, p_shape, p_color = self.vq(z, valid_mask=valid_mask)
-        out = self.decoder({'latent': z_q})
-        return out, vq_loss, p_shape, p_color
+    def forward(self, inputs, valid_mask=None, temperature=1.0):
+        enc_out = self.encoder(inputs)
+        z_vq = enc_out['latent_vq']
+        z_pose = enc_out['latent_pose']
+        
+        # Soft-routing quantization (Straight-Through Gumbel Softmax)
+        z_q, vq_loss, p_shape, p_color = self.vq(z_vq, valid_mask=valid_mask, temperature=temperature)
+        
+        # Feature combinations (Structural Identity + Continuous Orientation)
+        latent_combined = torch.cat([z_q, z_pose], dim=-1)
+        out = self.decoder({'latent': latent_combined})
+        return out, vq_loss, p_shape, p_color, z_vq
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -290,11 +299,27 @@ def train_phase_0(cfg, p0_dir, wb_run, dataset):
         for _ in tqdm(range(cfg['p0_steps']), desc=f"P0 E{epoch:03d}", leave=False):
             batch = dataset.sample(cfg['p0_batch'])
             state = batch['state'].to(device)
+            B = state.shape[0]
             vmask = compute_valid_patch_mask(state, cfg['patch_size']).to(device)
 
-            out, vq_loss, p_shape, p_color = model({'state': state}, valid_mask=vmask)
+            # Temperature annealing for Gumbel Softmax (1.0 -> 0.1)
+            tau = max(0.1, 1.0 - (epoch / cfg['p0_epochs']))
+            
+            # --- 1. Augmented infoNCE Contrastive Pathway (Invariance) ---
+            k = torch.randint(1, 4, (1,)).item()
+            state_rot = torch.rot90(state, k=k, dims=[2, 3])
+            vmask_rot = torch.rot90(vmask.view(B, 6, 6), k=k, dims=[1, 2]).reshape(B, 36)
+            _, vq_loss_rot, _, _, z_vq_rot = model({'state': state_rot}, valid_mask=vmask_rot, temperature=tau)
+            
+            # Align augmented patch grids: rotate back to calculate point-wise contrastive MSE
+            z_aligned = torch.rot90(z_vq_rot.view(B, 6, 6, -1).permute(0, 3, 1, 2), k=-k, dims=[2, 3]).flatten(2).transpose(1, 2)
+            
+            # --- 2. Standard State Pathway ---
+            out, vq_loss, p_shape, p_color, z_vq = model({'state': state}, valid_mask=vmask, temperature=tau)
             loss_dict  = model.decoder.loss({'state': state}, out)
-            total_loss = loss_dict['loss'] + vq_loss
+            
+            info_nce_loss = F.mse_loss(z_aligned, z_vq) # Forces structural invariance
+            total_loss = loss_dict['loss'] + vq_loss + vq_loss_rot + (1.0 * info_nce_loss)
 
             if torch.isnan(total_loss) or torch.isinf(total_loss):
                 nan_streak += 1
@@ -393,15 +418,12 @@ def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset, s
     metrics_path    = os.path.join(p1_dir, 'metrics_log.jsonl')
     plots_dir       = os.path.join(p1_dir, 'plots')
 
-    # ── FPS Initialization: extract semantic slot priors from frozen VQ ─────
-    print("🔍 Extracting 10 FPS Semantic Slots from frozen codebook...")
-    with torch.no_grad():
-        semantic_inits = frozen_vq.get_farthest_point_samples(target_slots=cfg['num_slots'])
-
     # ── Models ──────────────────────────────────────────────────────────────
     slot_enc  = SemanticSlotEncoder(cfg)
     slot_dec  = SemanticDecoder(cfg)
-    slot_enc.inject_semantic_priors(semantic_inits)
+    
+    # Inject Phase 0 Codebook as learnable anchors for Phase 1
+    slot_enc.inject_codebook(frozen_vq)
 
     base_enc  = DeepTransformerEncoder(cfg)
     base_dec  = TransformerDecoder(cfg)
@@ -641,7 +663,27 @@ def main(cfg: dict):
 
     root_dir, p0_dir, p1_dir = make_run_dir(cfg)
 
+    # Base generative priors
     train_dataset = ReARCDataset(data_path=cfg['data_path'])
+    
+    # Curriculum Mix (ARC-Heavy for Reasoning + Re-ARC for Shapes)
+    try:
+        arc_heavy = ARCDataset(data_path=cfg['arc_heavy_path'])
+        
+        # Simple dynamic mix sampling class
+        class CurriculumMix:
+            def __init__(self, ds1, ds2):
+                self.ds1, self.ds2 = ds1, ds2
+            def sample(self, bsz):
+                b1 = self.ds1.sample(bsz // 2)
+                b2 = self.ds2.sample(bsz - (bsz // 2))
+                return {'state': torch.cat([b1['state'], b2['state']], dim=0)}
+                
+        train_dataset = CurriculumMix(train_dataset, arc_heavy)
+        print("🌍 Mixed ARC-Heavy into training curriculum.")
+    except Exception:
+        print("⚠️  ARC-Heavy dataset not found at path — defaulting to pure Re-ARC.")
+        
     try:
         eval_dataset = ARCDataset(data_path=cfg['eval_data_path'])
     except Exception:

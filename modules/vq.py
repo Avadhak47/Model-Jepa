@@ -33,8 +33,9 @@ class FactorizedVectorQuantizer(nn.Module):
         self.register_buffer('shape_usage', torch.zeros(self.num_shape_codes))
         self.register_buffer('color_usage', torch.zeros(self.num_color_codes))
 
-    def _quantize(self, flat_input, embedding_layer, num_codes, usage_buffer=None, valid_mask=None):
+    def _quantize(self, flat_input, embedding_layer, num_codes, usage_buffer=None, valid_mask=None, temperature=1.0):
         """
+
         valid_mask: Optional bool tensor [N_total] — True for real patches, False for padding.
         When provided, perplexity is calculated ONLY over real (non-padded) patches.
         This prevents padded zeros from dominating entropy and falsely suppressing perplexity.
@@ -44,10 +45,12 @@ class FactorizedVectorQuantizer(nn.Module):
                     + torch.sum(embedding_layer.weight**2, dim=1)
                     - 2 * torch.matmul(flat_input, embedding_layer.weight.t()))
                     
-        # Encode (all patches — quantization itself is unaffected by masking)
-        encoding_indices = torch.argmin(distances, dim=1).unsqueeze(1)
-        encodings = torch.zeros(encoding_indices.shape[0], num_codes, device=flat_input.device)
-        encodings.scatter_(1, encoding_indices, 1)
+        # Encode using Gumbel-Softmax (Straight-Through Estimator)
+        # Logits are negative distances (closest code = highest logit)
+        logits = -distances
+        encodings = F.gumbel_softmax(logits, tau=temperature, hard=True)
+        # For tracking true argmin hits (needed for usage buffers)
+        encoding_indices = encodings.argmax(dim=1).unsqueeze(1)
         
         # Quantize
         quantized = torch.matmul(encodings, embedding_layer.weight)
@@ -72,12 +75,13 @@ class FactorizedVectorQuantizer(nn.Module):
         
         return quantized, perplexity
 
-    def forward(self, inputs, valid_mask=None):
+    def forward(self, inputs, valid_mask=None, temperature=1.0):
         """
         Expects inputs of shape [B, C, H, W] where C = embedding_dim, OR [B, N, C].
         
         valid_mask: Optional bool tensor [B, N] where True = real content patch,
                     False = zero-padding patch. Used to compute unbiased perplexity.
+        temperature: Gumbel-Softmax temperature for soft-to-hard routing.
         """
         is_spatial = inputs.dim() == 4
         if is_spatial:
@@ -98,11 +102,11 @@ class FactorizedVectorQuantizer(nn.Module):
         # Quantize independently (both receive the same spatial valid_mask)
         quantized_shape, perp_shape = self._quantize(
             flat_shape, self.embedding_shape, self.num_shape_codes,
-            self.shape_usage, flat_valid_mask
+            self.shape_usage, flat_valid_mask, temperature=temperature
         )
         quantized_color, perp_color = self._quantize(
             flat_color, self.embedding_color, self.num_color_codes,
-            self.color_usage, flat_valid_mask
+            self.color_usage, flat_valid_mask, temperature=temperature
         )
         
         # Concat back together
@@ -120,8 +124,9 @@ class FactorizedVectorQuantizer(nn.Module):
             
         loss = q_latent_loss + self.commitment_cost * e_latent_loss
         
-        # Straight-through estimator (applied to ALL patches so shape is preserved)
-        quantized_flat = flat_input + (quantized_flat - flat_input).detach()
+        # With Gumbel-Softmax, we no longer need the non-differentiable STE trick.
+        # The gradients flow naturally through `quantized_flat` (matrix multiplication
+        # of the soft one-hot encodings and the codebook).
         quantized = quantized_flat.view(inputs_perm.shape)
         
         if is_spatial:

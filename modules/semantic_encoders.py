@@ -82,6 +82,11 @@ class SemanticSlotEncoder(nn.Module):
         
         self.vocab_size = config.get('vocab_size', 10)
         
+        # New: Factorized Latent Dimensions
+        self.vq_dim = config.get('latent_dim', 256)
+        self.pose_dim = config.get('pose_dim', 64)
+        self.full_dim = self.vq_dim + self.pose_dim # 320
+        
         # Sobel Filters (Fixed)
         sobel_x = torch.tensor([[-1., 0., 1.], [-2., 0., 2.], [-1., 0., 1.]]).view(1, 1, 3, 3)
         sobel_y = torch.tensor([[-1., -2., -1.], [0., 0., 0.], [1., 2., 1.]]).view(1, 1, 3, 3)
@@ -90,6 +95,10 @@ class SemanticSlotEncoder(nn.Module):
         
         # In Channels: 10 (OneHot) + 2 (Sobel X/Y) = 12
         self.patch_embed = nn.Conv2d(12, self.embed_dim, kernel_size=self.patch_size, stride=self.patch_size)
+        
+        # NEW: Learnable Slot Sampling Queries
+        # These are the "Objectness" priors that will sample from the codebook
+        self.slot_sampler_queries = nn.Parameter(torch.randn(1, self.num_slots, self.embed_dim))
         
         self.patch_mlp = nn.Sequential(
             nn.LayerNorm(self.embed_dim),
@@ -102,38 +111,59 @@ class SemanticSlotEncoder(nn.Module):
         self.patch_rope_attn = RoPESelfAttention(self.embed_dim, num_heads=4, grid_size=self.grid_size)
         
         self.norm_inputs = nn.LayerNorm(self.embed_dim)
-        self.norm_slots = nn.LayerNorm(self.embed_dim)
-        self.norm_mlp = nn.LayerNorm(self.embed_dim)
+        self.norm_slots = nn.LayerNorm(self.full_dim)
+        self.norm_mlp = nn.LayerNorm(self.full_dim)
         
-        self.q_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
-        self.k_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
-        self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
-        self.gru = nn.GRUCell(self.embed_dim, self.embed_dim)
+        self.q_proj = nn.Linear(self.full_dim, self.full_dim, bias=False)
+        self.k_proj = nn.Linear(self.embed_dim, self.full_dim, bias=False)
+        self.v_proj = nn.Linear(self.embed_dim, self.full_dim, bias=False)
+        self.gru = nn.GRUCell(self.full_dim, self.full_dim)
         
         self.slot_mlp = nn.Sequential(
-            nn.Linear(self.embed_dim, self.embed_dim * 2),
+            nn.Linear(self.full_dim, self.full_dim * 2),
             nn.GELU(),
-            nn.Linear(self.embed_dim * 2, self.embed_dim)
+            nn.Linear(self.full_dim * 2, self.full_dim)
         )
         self.to(self.device)
 
-    def inject_semantic_priors(self, fps_slots):
+    def inject_codebook(self, vq_module):
         """
-        Called between Phase 0 and Phase 1 to inject sampled Codebook modes.
-        fps_slots: [1, num_slots, embed_dim]
+        Registers codebooks from Phase 0 as learnable parameters for Phase 1.
+        Allows the model to "fine-tune" the primitives while learning slots.
+        """
+        # Shape: [V_s, 128], Color: [V_c, 128]
+        self.codebook_shape = nn.Parameter(vq_module.embedding_shape.weight.data.clone())
+        self.codebook_color = nn.Parameter(vq_module.embedding_color.weight.data.clone())
+        
+        # Sampler channels: split queries to attend to factorized codebooks
+        self.shape_attn = nn.MultiheadAttention(self.vq_dim // 2, num_heads=4, batch_first=True).to(self.device)
+        self.color_attn = nn.MultiheadAttention(self.vq_dim // 2, num_heads=4, batch_first=True).to(self.device)
 
-        Design: keeps the FPS vector frozen as a semantic anchor, but registers
-        a learnable `prior_delta` (initialised to zero) on top of it.
-        - At epoch 0: delta=0, so initialisation is identical to pure FPS.
-        - With gradient flow: delta sculpts each slot's starting position toward
-          the clusters its patches actually live in, without disrupting the
-          codebook-derived semantic meaning of the base prior.
+    def sample_slot_priors(self, bsz):
         """
-        self.semantic_priors = nn.Parameter(fps_slots.to(self.device), requires_grad=False)
-        # Learnable offset — zero-initialised so it doesn't change anything on day 1
-        self.prior_delta = nn.Parameter(
-            torch.zeros_like(fps_slots, device=self.device), requires_grad=True
-        )
+        Learnable Sampling: Slot Queries attend to the Factorized Codebook.
+        """
+        if not hasattr(self, 'codebook_shape'):
+            return torch.zeros(bsz, self.num_slots, self.full_dim, device=self.device)
+
+        # Split master query into shape and color queries [B, K, 128]
+        q_shape, q_color = torch.chunk(self.slot_sampler_queries, 2, dim=-1)
+        q_shape = q_shape.expand(bsz, -1, -1)
+        q_color = q_color.expand(bsz, -1, -1)
+        
+        # Attend to 128-dim codebooks
+        s_keys = self.codebook_shape.unsqueeze(0).expand(bsz, -1, -1)
+        c_keys = self.codebook_color.unsqueeze(0).expand(bsz, -1, -1)
+        
+        shape_priors, _ = self.shape_attn(q_shape, s_keys, s_keys)
+        color_priors, _ = self.color_attn(q_color, c_keys, c_keys)
+        
+        # Combine structural priors [B, K, 256]
+        structural_priors = torch.cat([shape_priors, color_priors], dim=-1)
+        
+        # Pad with zeros for initial Pose [B, K, 64]
+        pose_init = torch.zeros(bsz, self.num_slots, self.pose_dim, device=self.device)
+        return torch.cat([structural_priors, pose_init], dim=-1) # [B, K, 320]
 
     def forward(self, inputs, temperature: float = None):
         img = inputs["state"].float().to(self.device) # [B, 1, H, W]
@@ -165,16 +195,16 @@ class SemanticSlotEncoder(nn.Module):
 
         k, v = self.k_proj(x), self.v_proj(x)
 
-        # Semantic Slot Initialization:
-        # base (frozen FPS anchor) + delta (learnable sculpting offset, starts at 0)
-        slots = (self.semantic_priors + self.prior_delta).expand(B, -1, -1)
+        # 4. Learnable Sampling: Slots are initialized by querying the codebook
+        # and then contextualizing against input patches before refinement.
+        slots = self.sample_slot_priors(B)
 
         for _ in range(self.slot_iters):
             slots_prev = slots
             slots_norm = self.norm_slots(slots)
             q = self.q_proj(slots_norm)
 
-            attn_logits = torch.bmm(k, q.transpose(1, 2)) * (self.embed_dim ** -0.5)
+            attn_logits = torch.bmm(k, q.transpose(1, 2)) * (self.full_dim ** -0.5)
             # Divide by temperature: high temp → soft (exploratory), low → sharp (specialised)
             attn = F.softmax(attn_logits / temp, dim=-1)
             attn_norm = attn + 1e-8
@@ -182,9 +212,9 @@ class SemanticSlotEncoder(nn.Module):
 
             updates = torch.bmm(attn_norm.transpose(1, 2), v)
             slots = self.gru(
-                updates.reshape(-1, self.embed_dim),
-                slots_prev.reshape(-1, self.embed_dim)
-            ).reshape(B, self.num_slots, self.embed_dim)
+                updates.reshape(-1, self.full_dim),
+                slots_prev.reshape(-1, self.full_dim)
+            ).reshape(B, self.num_slots, self.full_dim)
             slots = slots + self.slot_mlp(self.norm_mlp(slots))
 
         masks = attn.transpose(1, 2).view(B, self.num_slots, self.grid_size, self.grid_size).detach()

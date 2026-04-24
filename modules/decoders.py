@@ -103,10 +103,16 @@ class PatchDecoder(TransformerDecoder):
     """
     def __init__(self, config):
         super().__init__(config)
-        self.patch_size = config.get('patch_size', 2)
+        self.patch_size = config.get('patch_size', 5) # Updated for ARC 6x6 grid
+        
+        self.vq_dim = config.get('latent_dim', 256)
+        self.pose_dim = config.get('pose_dim', 64)
+        self.full_dim = self.vq_dim + self.pose_dim # 320
+        
+        self.hidden_dim = config.get('hidden_dim', 256)
 
         dec_layer = nn.TransformerEncoderLayer(
-            d_model=self.latent_dim,
+            d_model=self.full_dim,
             nhead=4,
             dim_feedforward=self.hidden_dim * 4,
             batch_first=True,
@@ -115,7 +121,7 @@ class PatchDecoder(TransformerDecoder):
         self.transformer = nn.TransformerEncoder(dec_layer, num_layers=2, enable_nested_tensor=False)
 
         self.pixel_generator = nn.Sequential(
-            nn.ConvTranspose2d(self.latent_dim, self.hidden_dim, kernel_size=self.patch_size, stride=self.patch_size),
+            nn.ConvTranspose2d(self.full_dim, self.hidden_dim, kernel_size=self.patch_size, stride=self.patch_size),
             nn.ReLU(),
             nn.Conv2d(self.hidden_dim, self.vocab_size, kernel_size=3, padding=1)
         )

@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from modules.interfaces import BaseEncoder
+from modules.semantic_encoders import RoPESelfAttention
 
 class MLPEncoder(BaseEncoder):
     """Simple continuous state encoder."""
@@ -151,24 +152,21 @@ class PatchTransformerEncoder(BaseEncoder):
         super().__init__(config)
         # Using One-Hots instead of raw integers to avoid categorical magnitude bias
         self.in_channels = 10
-        self.patch_size = config.get("patch_size", 2)
-        embed_dim = config.get("hidden_dim", 512)
-        self.latent_dim = config.get("latent_dim", 128)
+        self.patch_size = config.get("patch_size", 5) # Changed to 5 for ARC grids (30/5 = 6)
+        embed_dim = config.get("hidden_dim", 256)
+        
+        self.latent_dim = config.get("latent_dim", 256) # For VQ
+        self.pose_dim = config.get("pose_dim", 64)      # For Continuous Pose
+        self.grid_size = 30 // self.patch_size
         
         self.patch_embed = nn.Conv2d(self.in_channels, embed_dim, kernel_size=self.patch_size, stride=self.patch_size)
         
-        # Max patches for 32x32 with patch 2 is 16x16 = 256. 400 is overly safe scale.
-        self.pos_embed = nn.Parameter(torch.randn(1, 400, embed_dim)) 
-        
-        enc_layer = nn.TransformerEncoderLayer(
-            d_model=embed_dim, nhead=8, dim_feedforward=embed_dim*4,
-            batch_first=True, norm_first=True
-        )
-        self.transformer = nn.TransformerEncoder(enc_layer, num_layers=6, enable_nested_tensor=False)
+        # Relational Patch Pre-Contextualization with RoPE
+        self.rope_attn = RoPESelfAttention(embed_dim, num_heads=4, grid_size=self.grid_size)
         
         self.projector = nn.Sequential(
             nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, self.latent_dim)
+            nn.Linear(embed_dim, self.latent_dim + self.pose_dim) # Dual Pathway Bottleneck
         )
         self.to(self.device)
         
@@ -186,13 +184,17 @@ class PatchTransformerEncoder(BaseEncoder):
         x = self.patch_embed(img_onehot) # [B, D, H', W']
         B, C, H, W = x.shape
         x = x.flatten(2).transpose(1, 2) # [B, N, D]
-        N = x.shape[1]
         
-        x = x + self.pos_embed[:, :N, :] 
-        x = self.transformer(x) # [B, N, D]
-        z = self.projector(x)   # [B, N, latent_dim]
+        # RoPE Self-Attention contextualization
+        x = x + self.rope_attn(x)
         
-        return {"latent": z, "spatial_shape": (H, W)}
+        z = self.projector(x)   # [B, N, latent_dim + pose_dim]
+        
+        # Factorize Structural (VQ) and Pose (Continuous)
+        z_vq = z[:, :, :self.latent_dim]
+        z_pose = z[:, :, self.latent_dim:]
+        
+        return {"latent_vq": z_vq, "latent_pose": z_pose, "spatial_shape": (H, W)}
 
 class Decoder(BaseEncoder):
     """Inverts the latent space back to pixel space for autencoding metrics."""

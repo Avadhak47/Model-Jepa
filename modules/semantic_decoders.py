@@ -36,14 +36,17 @@ class SemanticDecoder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.device = config['device']
-        self.embed_dim = config['hidden_dim']
+        self.vq_dim = config.get('latent_dim', 256)
+        self.pose_dim = config.get('pose_dim', 64)
+        self.full_dim = self.vq_dim + self.pose_dim # 320
+        
         self.vocab_size = config['vocab_size']
         self.grid_size = config['grid_size']
         
-        self.decoder_pos = SoftPositionEmbed(self.embed_dim, (self.grid_size, self.grid_size))
+        self.decoder_pos = SoftPositionEmbed(self.full_dim, (self.grid_size, self.grid_size))
         
         self.spatial_broadcast = nn.Sequential(
-            nn.ConvTranspose2d(self.embed_dim, 64, kernel_size=5, stride=1, padding=2),
+            nn.ConvTranspose2d(self.full_dim, 64, kernel_size=5, stride=1, padding=2),
             nn.ReLU(),
             nn.ConvTranspose2d(64, 32, kernel_size=5, stride=1, padding=2),
             nn.ReLU()
