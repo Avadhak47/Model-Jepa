@@ -168,9 +168,16 @@ def load_slot_model(slot_ckpt: str, cfg: dict, slot_params: dict):
     enc = SemanticSlotEncoder(slot_cfg).to(cfg['device'])
     dec = SemanticDecoder(slot_cfg).to(cfg['device'])
 
-    ckpt     = torch.load(slot_ckpt, map_location=cfg['device'], weights_only=False)
+    ckpt      = torch.load(slot_ckpt, map_location=cfg['device'], weights_only=False)
     enc_state = ckpt.get('slot_enc', ckpt)
     dec_state = ckpt.get('slot_dec', {})
+
+    # The encoder dynamically registers semantic_priors via inject_semantic_priors.
+    # We must replicate this structure before load_state_dict so the loaded weights have a target.
+    if 'semantic_priors' in enc_state:
+        # Pass a dummy tensor of the exact shape found in the checkpoint
+        dummy_fps = torch.zeros_like(enc_state['semantic_priors'], device=cfg['device'])
+        enc.inject_semantic_priors(dummy_fps)
 
     enc.load_state_dict(enc_state, strict=False)
     if dec_state:
