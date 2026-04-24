@@ -58,8 +58,8 @@ ARC_CMAP = ListedColormap(ARC_COLORS)
 def detect_arch_from_p0(ckpt_path: str) -> dict:
     ckpt  = torch.load(ckpt_path, map_location='cpu', weights_only=False)
     state = ckpt.get('model', ckpt)
-    arch  = {'patch_size':2, 'hidden_dim':128, 'latent_dim':128,
-              'num_shape_codes':256, 'num_color_codes':16,
+    arch  = {'patch_size':5, 'hidden_dim':256, 'latent_dim':256, 'pose_dim':64,
+              'num_shape_codes':512, 'num_color_codes':16,
               'vocab_size':10, 'grid_size':30, 'in_channels':10,
               'focal_gamma':2.0, 'commitment_cost':0.25}
     for key, val in state.items():
@@ -67,14 +67,25 @@ def detect_arch_from_p0(ckpt_path: str) -> dict:
             arch['hidden_dim']  = val.shape[0]
             arch['patch_size']  = val.shape[2]
             print(f"  🔎 Detected patch_size={arch['patch_size']}, hidden_dim={arch['hidden_dim']} from '{key}'")
-        if 'encoder.projector' in key and 'weight' in key and val.dim() == 2:
-            arch['latent_dim']  = val.shape[0]
+        if 'encoder.projector' in key and val.dim() == 2:
+            # New Dual Pathway detection
+            full_latent = val.shape[0]
+            # If weight is from PatchTransformerEncoder, it's latent_dim + pose_dim
+            # We'll try to find vq.embedding_shape to confirm latent_dim
+            pass
         if 'vq.embedding_shape.weight' in key and val.dim() == 2:
             arch['num_shape_codes'] = val.shape[0]
-            print(f"  🔎 Detected num_shape_codes={arch['num_shape_codes']} from '{key}'")
+            arch['latent_dim'] = val.shape[1] * 2
+            print(f"  🔎 Detected num_shape_codes={arch['num_shape_codes']}, latent_dim={arch['latent_dim']} from '{key}'")
         if 'vq.embedding_color.weight' in key and val.dim() == 2:
             arch['num_color_codes'] = val.shape[0]
             print(f"  🔎 Detected num_color_codes={arch['num_color_codes']} from '{key}'")
+            
+    # Derive pose_dim if possible
+    for key, val in state.items():
+        if 'encoder.projector' in key and val.dim() == 2:
+            arch['pose_dim'] = val.shape[0] - arch['latent_dim']
+            print(f"  🔎 Derived pose_dim={arch['pose_dim']} from projector output {val.shape[0]}")
     return arch
 
 def load_phase0(ckpt_path: str, cfg: dict, device: str):
@@ -119,16 +130,20 @@ def patch_to_pixel(patch_tensor: torch.Tensor) -> np.ndarray:
 
 @torch.no_grad()
 def decode_single_code(decoder, code_vec: torch.Tensor, device: str,
-                       num_patches: int = 225) -> np.ndarray:
+                       num_patches: int = 36, pose_dim: int = 64) -> np.ndarray:
     """
-    Tile a single 128-d code vector across all num_patches patch positions and
-    run the decoder.  num_patches = (grid_size // patch_size)^2.
+    Tile a single code vector + neutral pose across all num_patches.
     Returns a (30, 30) integer grid.
     """
-    z = code_vec.unsqueeze(0).unsqueeze(0).expand(1, num_patches, -1).to(device)
-    out = decoder({'latent': z})
-    logits = out['reconstructed_logits']     # [1, 10, 30, 30]  — PatchDecoder key
-    grid = logits.argmax(dim=1).squeeze(0).cpu().numpy()                    # (30, 30)
+    z_vq = code_vec.unsqueeze(0).unsqueeze(0).expand(1, num_patches, -1).to(device)
+    z_pose = torch.zeros(1, num_patches, pose_dim, device=device)
+    
+    # Combine pathways as expected by PatchDecoder
+    z_full = torch.cat([z_vq, z_pose], dim=-1)
+    
+    out = decoder({'latent': z_full})
+    logits = out['reconstructed_logits']     # [1, 10, 30, 30]
+    grid = logits.argmax(dim=1).squeeze(0).cpu().numpy()
     return grid
 
 
@@ -158,13 +173,13 @@ def collect_patch_samples(encoder, vq, dataset, cfg: dict,
         states = batch['state'].to(device)   # [B, 1, 30, 30]
         B      = states.shape[0]
 
-        z  = encoder({'state': states})['latent']     # [B, N, 128]
-        z4 = z.permute(0, 2, 1).view(B, 128, Ph, Pw) # [B, 128, 15, 15]
-
-        # Distances to shape sub-codebook
-        flat_z      = z4.permute(0, 2, 3, 1).contiguous().view(-1, 128)
-        flat_shape  = flat_z[:, :64]
-        flat_color  = flat_z[:, 64:]
+        z_out = encoder({'state': states})
+        z_vq  = z_out['latent_vq'] # [B, N, D]
+        B, N, D = z_vq.shape
+        flat_z = z_vq.view(-1, D)
+        
+        flat_shape = flat_z[:, :D//2]
+        flat_color = flat_z[:, D//2:]
 
         dist_shape  = (flat_shape.pow(2).sum(1, keepdim=True)
                        + vq.embedding_shape.weight.pow(2).sum(1)
@@ -251,15 +266,17 @@ def plot_decoded_primitives(decoder, vq, device, out_dir):
                  fontsize=13, y=1.01)
 
     num_patches = decoder.num_patches_per_grid
+    pose_dim = decoder.pose_dim if hasattr(decoder, 'pose_dim') else 64
     for i, ax in enumerate(axes.flat):
         if i >= vq.num_shape_codes:
             ax.axis('off')
             continue
-        # Full code vector: shape code + first color code
-        shape_vec = vq.embedding_shape.weight[i]         # [64]
-        color_vec = vq.embedding_color.weight[0]         # [64]  use code-0 as neutral color
-        code_vec  = torch.cat([shape_vec, color_vec])    # [128]
-        grid      = decode_single_code(decoder, code_vec, device, num_patches=num_patches)
+        # Full structural code vector: shape code + first color code
+        shape_vec = vq.embedding_shape.weight[i]
+        color_vec = vq.embedding_color.weight[0]
+        code_vec  = torch.cat([shape_vec, color_vec]) 
+        grid      = decode_single_code(decoder, code_vec, device, 
+                                       num_patches=num_patches, pose_dim=pose_dim)
         ax.imshow(grid, cmap=ARC_CMAP, vmin=0, vmax=9, interpolation='nearest')
         ax.set_title(f'{i}', fontsize=5, pad=1)
         ax.axis('off')
@@ -282,15 +299,17 @@ def plot_color_primitives(decoder, vq, device, out_dir):
                  "(Shape code fixed to code-0; only color varies)",
                  fontsize=13)
 
-    shape_vec = vq.embedding_shape.weight[0]  # neutral shape
     num_patches = decoder.num_patches_per_grid
+    pose_dim = decoder.pose_dim if hasattr(decoder, 'pose_dim') else 64
+    shape_vec = vq.embedding_shape.weight[0]  # neutral shape
     for i, ax in enumerate(axes.flat):
         if i >= vq.num_color_codes:
             ax.axis('off')
             continue
         color_vec = vq.embedding_color.weight[i]
         code_vec  = torch.cat([shape_vec, color_vec])
-        grid      = decode_single_code(decoder, code_vec, device, num_patches=num_patches)
+        grid      = decode_single_code(decoder, code_vec, device, 
+                                       num_patches=num_patches, pose_dim=pose_dim)
         ax.imshow(grid, cmap=ARC_CMAP, vmin=0, vmax=9, interpolation='nearest')
         ax.set_title(f'Color-{i}', fontsize=9)
         ax.axis('off')
@@ -498,9 +517,12 @@ def main():
     encoder, vq, decoder = load_phase0(args.checkpoint, CFG, args.device)
 
     # ── FPS seeds (same deterministic call as the training script) ──────────
-    fps_slots          = vq.get_farthest_point_samples(target_slots=10)  # [1,10,128]
-    fps_shape_latents  = fps_slots[0, :, :64]   # [10, 64]
-    W                  = vq.embedding_shape.weight.data   # [256, 64]
+    num_slots = CFG.get('num_slots', 10)
+    fps_slots          = vq.get_farthest_point_samples(target_slots=num_slots)
+    # Extract only the structural part of the FPS seed
+    vq_half = CFG['latent_dim'] // 2
+    fps_shape_latents  = fps_slots[0, :, :vq_half]
+    W                  = vq.embedding_shape.weight.data
     dists              = torch.cdist(fps_shape_latents, W)
     fps_shape_ids      = dists.argmin(dim=1).cpu().tolist()
     print(f"\n🎯 FPS seed → shape codes: {fps_shape_ids}")
