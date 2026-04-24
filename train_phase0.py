@@ -69,7 +69,7 @@ except ImportError:
 # ═══════════════════════════════════════════════════════════════════════════
 CFG = {
     # Run identity
-    'run_name':             'FactorizedFPS-v4',  # patch6-slot5iters
+    'run_name':             'FactorizedFPS-v5',  # patch5, hid512, 16slots-7iters, codebook512
     'wandb_project':        'NS-ARC-Scaling',
 
     # Architecture
@@ -94,7 +94,7 @@ CFG = {
     'slot_temp_anneal':     300,      # epochs over which to linearly anneal
 
     # Phase 0 training
-    'p0_epochs':            500,   # Fresh run — patch_size=6 is incompatible with v3 checkpoint
+    'p0_epochs':            500,   # Fresh run — patch_size=5, hidden_dim=512 (new architecture)
     'p0_steps':             100,
     'p0_batch':             128,
     'p0_lr':                5e-4,
@@ -130,11 +130,13 @@ CFG = {
     'val_batch_size':       10,
 
     # Resume — fresh run.
-    # ⚠️  patch_size changed 2→6: old v3 checkpoint (patch_size=2, Conv2d 10×2×2) is
-    # INCOMPATIBLE with new architecture (patch_size=6, Conv2d 10×6×6, 25 patches vs 225).
-    # Must start from scratch.
+    # ⚠️  Architecture changed v4→v5:
+    #   patch_size: 6→5  (36 patches per grid)
+    #   hidden_dim: 128→512, nhead: 4→8, transformer layers: 2→6
+    #   num_shape_codes: 256→512
+    #   num_slots: 10→16, slot_iters: 5→7
+    # All of these change weight shapes — must start from scratch.
     'p0_resume_from': None,
-    # Phase 1 is fresh
     'p1_resume_from': None,
 }
 
