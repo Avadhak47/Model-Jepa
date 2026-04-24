@@ -431,8 +431,13 @@ def plot_tsne(patch_embs, patch_cols, cfg, out_dir, max_pts=3000):
     # PCA first to 50 dims for speed
     n_pca = min(50, X.shape[1])
     X_pca = PCA(n_components=n_pca).fit_transform(X)
-    X_2d  = TSNE(n_components=2, perplexity=40, n_iter=800,
-                 init='pca', random_state=42).fit_transform(X_pca)
+    # max_iter replaced n_iter in sklearn ≥ 1.2; fall back gracefully
+    try:
+        X_2d = TSNE(n_components=2, perplexity=40, max_iter=800,
+                    init='pca', random_state=42).fit_transform(X_pca)
+    except TypeError:
+        X_2d = TSNE(n_components=2, perplexity=40, n_iter=800,
+                    init='pca', random_state=42).fit_transform(X_pca)
 
     fig, ax = plt.subplots(figsize=(10, 9))
     for c in range(10):
