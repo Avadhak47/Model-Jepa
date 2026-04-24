@@ -130,7 +130,7 @@ CFG = {
     'data_path':            'arc_data/re-arc/tasks',
     'arc_heavy_path':       'arc_data/arc-heavy/training',
     'eval_data_path':       'arc_data/original/evaluation',
-    'val_batch_size':       10,
+    'val_batch_size':       40,
 
     # Resume — fresh run.
     # ⚠️  Architecture changed v4→v5:
