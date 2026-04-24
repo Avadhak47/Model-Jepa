@@ -371,7 +371,7 @@ def train_phase_0(cfg, p0_dir, wb_run, dataset):
             q_pct = int(cfg['surgery_quantile'] * 100)
             print(f"⚡ P0 E{epoch}: Resurrection (bottom {q_pct}% by usage)...")
             with torch.no_grad():
-                z_raw = model.encoder({'state': state})['latent']
+                z_raw = model.encoder({'state': state})['latent_vq']
                 n_s, n_c = model.vq.resurrect_dead_codes(
                     z_raw, valid_mask=vmask,
                     aggression_quantile=cfg['surgery_quantile'])
