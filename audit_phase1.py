@@ -69,7 +69,14 @@ def detect_arch_from_p0(ckpt_path: str) -> dict:
 
 def detect_slot_params(slot_ckpt_path: str) -> dict:
     """Read num_slots and slot embed_dim from the slot checkpoint."""
+    if not os.path.exists(slot_ckpt_path):
+        raise FileNotFoundError(
+            f"Slot checkpoint not found: {slot_ckpt_path}\n"
+            f"  Phase 1 saves checkpoints every p1_save_interval epochs.\n"
+            f"  Check the phase1/ directory with: ls <run_dir>/phase1/"
+        )
     ckpt  = torch.load(slot_ckpt_path, map_location='cpu', weights_only=False)
+    # Phase 1 saves keys 'slot_enc' and 'slot_dec'
     state = ckpt.get('slot_enc', ckpt)
     params = {'num_slots': 10, 'slot_embed_dim': 128,
               'slot_iters': 3, 'slot_temperature': 0.1,
@@ -77,7 +84,7 @@ def detect_slot_params(slot_ckpt_path: str) -> dict:
     # semantic_priors: [1, num_slots, embed_dim]
     if 'semantic_priors' in state:
         sh = state['semantic_priors'].shape
-        params['num_slots']     = sh[1]
+        params['num_slots']      = sh[1]
         params['slot_embed_dim'] = sh[2]
     # patch_embed: [embed_dim, 12, patch_size, patch_size]
     if 'patch_embed.weight' in state:
@@ -87,6 +94,43 @@ def detect_slot_params(slot_ckpt_path: str) -> dict:
     print(f"  Slot params: num_slots={params['num_slots']}, "
           f"embed_dim={params['slot_embed_dim']}, patch_size={params['patch_size']}")
     return params
+
+
+def find_phase1_checkpoints(run_dir: str):
+    """
+    Given a run directory, auto-discover the Phase 1 checkpoint files.
+    Returns (slot_ckpt, base_ckpt, p0_ckpt) absolute paths.
+    """
+    p1_dir = os.path.join(run_dir, 'phase1')
+    p0_dir = os.path.join(run_dir, 'phase0')
+
+    # Phase 1 saves as: latest_slot_checkpoint.pth / latest_base_checkpoint.pth
+    # (set in train_phase0.py line 391-392)
+    slot_ckpt = os.path.join(p1_dir, 'latest_slot_checkpoint.pth')
+    base_ckpt = os.path.join(p1_dir, 'latest_base_checkpoint.pth')
+    p0_ckpt   = os.path.join(p0_dir, 'latest_checkpoint.pth')
+
+    print(f"  Auto-discovered from run dir: {run_dir}")
+    for label, path in [('slot_ckpt', slot_ckpt),
+                         ('base_ckpt', base_ckpt),
+                         ('p0_ckpt',   p0_ckpt)]:
+        status = '✅' if os.path.exists(path) else '❌ NOT FOUND'
+        print(f"    {label}: {os.path.basename(path)}  {status}")
+
+    if not os.path.exists(slot_ckpt):
+        # List what IS in the phase1 directory to help debug
+        if os.path.exists(p1_dir):
+            contents = os.listdir(p1_dir)
+            print(f"\n  phase1/ contains: {contents or '(empty — Phase 1 has not saved yet)'} ")
+        else:
+            print(f"\n  phase1/ directory does not exist yet — Phase 1 may not have started.")
+        raise FileNotFoundError(
+            f"Phase 1 slot checkpoint not found.\n"
+            f"  Either Phase 1 hasn't reached p1_save_interval yet, or use\n"
+            f"  --slot_ckpt / --base_ckpt to point at a specific file.\n"
+            f"  Expected: {slot_ckpt}"
+        )
+    return slot_ckpt, base_ckpt, p0_ckpt
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -523,23 +567,68 @@ def save_phase1_summary(results, slot_enc, out_dir):
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 def main():
-    parser = argparse.ArgumentParser(description='Phase 1 slot model audit')
-    parser.add_argument('--slot_ckpt', type=str, required=True,
-                        help='Phase 1 slot checkpoint (contains slot_enc / slot_dec keys)')
-    parser.add_argument('--base_ckpt', type=str, required=True,
-                        help='Phase 1 baseline checkpoint (contains base_enc / base_dec keys)')
-    parser.add_argument('--p0_ckpt',   type=str, required=True,
-                        help='Phase 0 checkpoint (needed for VQ and arch dims)')
+    parser = argparse.ArgumentParser(
+        description='Phase 1 slot model audit',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=\"""
+Examples:
+  # Pass a run directory — checkpoints are auto-discovered:
+  python audit_phase1.py --run_dir runs/FactorizedFPS-v4_2026-04-24_04-57-55
+
+  # Or pass explicit checkpoint paths:
+  python audit_phase1.py \\
+    --slot_ckpt runs/.../phase1/latest_slot_checkpoint.pth \\
+    --base_ckpt runs/.../phase1/latest_base_checkpoint.pth \\
+    --p0_ckpt   runs/.../phase0/latest_checkpoint.pth
+"""
+    )
+    # Option A: pass a run directory
+    parser.add_argument('--run_dir',   type=str, default=None,
+                        help='Run directory — checkpoints are auto-discovered inside it')
+    # Option B: pass individual checkpoint paths (overrides --run_dir)
+    parser.add_argument('--slot_ckpt', type=str, default=None,
+                        help='Phase 1 slot checkpoint  (latest_slot_checkpoint.pth)')
+    parser.add_argument('--base_ckpt', type=str, default=None,
+                        help='Phase 1 baseline checkpoint (latest_base_checkpoint.pth)')
+    parser.add_argument('--p0_ckpt',   type=str, default=None,
+                        help='Phase 0 checkpoint (latest_checkpoint.pth)')
     parser.add_argument('--out',       type=str,
                         default='evaluation_reports/phase1_audit')
     parser.add_argument('--n_grids',   type=int, default=150)
-    parser.add_argument('--n_show',    type=int, default=8,
-                        help='Grids to show in gallery panels')
+    parser.add_argument('--n_show',    type=int, default=8)
     parser.add_argument('--data_path', type=str, default='arc_data/re-arc')
     args = parser.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    # ── Resolve checkpoint paths ──────────────────────────────────────────────
+    if args.slot_ckpt and args.base_ckpt and args.p0_ckpt:
+        slot_ckpt = args.slot_ckpt
+        base_ckpt = args.base_ckpt
+        p0_ckpt   = args.p0_ckpt
+    elif args.run_dir:
+        slot_ckpt, base_ckpt, p0_ckpt = find_phase1_checkpoints(args.run_dir)
+    else:
+        # Try to find the most recent run automatically
+        runs_dir = 'runs'
+        if os.path.exists(runs_dir):
+            all_runs = sorted([
+                os.path.join(runs_dir, d) for d in os.listdir(runs_dir)
+                if os.path.isdir(os.path.join(runs_dir, d))
+            ])
+            for run in reversed(all_runs):
+                cand = os.path.join(run, 'phase1', 'latest_slot_checkpoint.pth')
+                if os.path.exists(cand):
+                    print(f"  Auto-using most recent run with Phase 1 checkpoint: {run}")
+                    slot_ckpt, base_ckpt, p0_ckpt = find_phase1_checkpoints(run)
+                    break
+            else:
+                parser.error(
+                    "No Phase 1 checkpoint found in any run.\n"
+                    "Pass --run_dir <path> or --slot_ckpt / --base_ckpt / --p0_ckpt.")
+        else:
+            parser.error("Pass --run_dir <path> or --slot_ckpt / --base_ckpt / --p0_ckpt.")
 
     print(f"{'═'*55}")
     print(f"  Phase 1 Slot Audit")
