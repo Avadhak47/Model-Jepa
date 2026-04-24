@@ -157,12 +157,13 @@ class PatchTransformerEncoder(BaseEncoder):
         
         self.latent_dim = config.get("latent_dim", 256) # For VQ
         self.pose_dim = config.get("pose_dim", 64)      # For Continuous Pose
+        self.num_heads = config.get("num_heads", 4)
         self.grid_size = 30 // self.patch_size
         
         self.patch_embed = nn.Conv2d(self.in_channels, embed_dim, kernel_size=self.patch_size, stride=self.patch_size)
         
         # Relational Patch Pre-Contextualization with RoPE
-        self.rope_attn = RoPESelfAttention(embed_dim, num_heads=8, grid_size=self.grid_size)
+        self.rope_attn = RoPESelfAttention(embed_dim, num_heads=self.num_heads, grid_size=self.grid_size)
         
         self.projector = nn.Sequential(
             nn.LayerNorm(embed_dim),

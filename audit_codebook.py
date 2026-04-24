@@ -80,12 +80,16 @@ def detect_arch_from_p0(ckpt_path: str) -> dict:
         if 'vq.embedding_color.weight' in key and val.dim() == 2:
             arch['num_color_codes'] = val.shape[0]
             print(f"  🔎 Detected num_color_codes={arch['num_color_codes']} from '{key}'")
-            
     # Derive pose_dim if possible
     for key, val in state.items():
         if 'encoder.projector' in key and val.dim() == 2:
             arch['pose_dim'] = val.shape[0] - arch['latent_dim']
             print(f"  🔎 Derived pose_dim={arch['pose_dim']} from projector output {val.shape[0]}")
+        if 'rope_attn.cos_emb' in key:
+            # head_dim is the last dimension of RoPE embeddings
+            head_dim = val.shape[-1]
+            arch['num_heads'] = arch['hidden_dim'] // head_dim
+            print(f"  🔎 Detected num_heads={arch['num_heads']} (head_dim={head_dim}) from '{key}'")
     return arch
 
 def load_phase0(ckpt_path: str, cfg: dict, device: str):
@@ -164,9 +168,9 @@ def collect_patch_samples(encoder, vq, dataset, cfg: dict,
     shape_usage = np.zeros(cfg['num_shape_codes'], dtype=np.int64)
     color_usage = np.zeros(cfg['num_color_codes'], dtype=np.int64)
 
-    patch_size = cfg['patch_size']  # 2
-    grid_size  = cfg['grid_size']   # 30
-    Ph = Pw    = grid_size // patch_size   # 15
+    patch_size = cfg['patch_size']
+    grid_size  = cfg['grid_size']
+    Ph = Pw    = grid_size // patch_size
 
     for _ in tqdm(range(n_batches), desc="Sampling real patches"):
         batch  = dataset.sample(cfg['batch_size'])
