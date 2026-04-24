@@ -188,10 +188,10 @@ def load_slot_model(slot_ckpt: str, cfg: dict, slot_params: dict):
 
 def load_baseline(base_ckpt: str, cfg: dict):
     from modules.encoders import DeepTransformerEncoder
-    from modules.decoders import PatchDecoder
+    from modules.decoders import TransformerDecoder
 
     enc = DeepTransformerEncoder(cfg).to(cfg['device'])
-    dec = PatchDecoder(cfg).to(cfg['device'])
+    dec = TransformerDecoder(cfg).to(cfg['device'])
 
     ckpt = torch.load(base_ckpt, map_location=cfg['device'], weights_only=False)
     enc_s = ckpt.get('base_enc', {})
