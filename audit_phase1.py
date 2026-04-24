@@ -154,7 +154,7 @@ def load_phase0_vq(p0_ckpt: str, cfg: dict):
 
 def load_slot_model(slot_ckpt: str, cfg: dict, slot_params: dict):
     from modules.semantic_encoders import SemanticSlotEncoder
-    from modules.decoders          import SpatialBroadcastDecoder
+    from modules.semantic_decoders import SemanticDecoder   # ← actual class used in train_phase0.py
 
     # Build a merged config for the slot encoder
     slot_cfg = {**cfg,
@@ -166,7 +166,7 @@ def load_slot_model(slot_ckpt: str, cfg: dict, slot_params: dict):
                 'patch_size':      slot_params['patch_size']}
 
     enc = SemanticSlotEncoder(slot_cfg).to(cfg['device'])
-    dec = SpatialBroadcastDecoder(slot_cfg).to(cfg['device'])
+    dec = SemanticDecoder(slot_cfg).to(cfg['device'])
 
     ckpt     = torch.load(slot_ckpt, map_location=cfg['device'], weights_only=False)
     enc_state = ckpt.get('slot_enc', ckpt)
@@ -201,10 +201,8 @@ def load_baseline(base_ckpt: str, cfg: dict):
 @torch.no_grad()
 def run_slot_inference(slot_enc, slot_dec, base_enc, base_dec,
                        dataset, cfg, slot_cfg, n_grids):
-    device  = cfg['device']
-    results = []
-    slot_mask_store  = []  # [B, num_slots, Ph, Pw]
-    slot_latent_store = [] # [B, num_slots, D]
+    device    = cfg['device']
+    results   = []
     num_slots = slot_cfg['num_slots']
 
     batch_size = min(16, n_grids)
@@ -215,49 +213,57 @@ def run_slot_inference(slot_enc, slot_dec, base_enc, base_dec,
         states = batch['state'].to(device)   # [B, 1, 30, 30]
         B      = states.shape[0]
 
-        # ── Slot forward ──────────────────────────────────────────────────
-        # Use final temperature (sharp attention) for eval
-        z_slot = slot_enc({'state': states}, temperature=slot_cfg.get('slot_temp_end', 0.1))
-        slots  = z_slot['latent']    # [B, num_slots, D]
-        masks  = z_slot['masks']     # [B, num_slots, Ph, Pw]
+        # ── Slot forward ──────────────────────────────────────────────────────
+        # SemanticSlotEncoder accepts optional temperature kwarg
+        try:
+            z_slot = slot_enc({'state': states},
+                              temperature=slot_cfg.get('slot_temp_end', 0.1))
+        except TypeError:
+            z_slot = slot_enc({'state': states})
 
-        out_slot = slot_dec({'latent': slots})
-        slot_recon_key = next((k for k in ('reconstruction','reconstructed_logits')
-                               if k in out_slot), None)
-        if slot_recon_key is None:
-            # Fallback: try to get any output
-            slot_recon_key = list(out_slot.keys())[0]
-        slot_logits = out_slot[slot_recon_key]   # [B, 10, 30, 30]
-        slot_recon  = slot_logits.argmax(1)       # [B, 30, 30]
+        slots = z_slot['latent']   # [B, num_slots, D]
 
-        # ── Baseline forward ───────────────────────────────────────────────
-        z_base   = base_enc({'state': states})['latent']
+        # SemanticDecoder returns 'reconstruction' (logits [B,10,H,W]) and
+        # 'alphas' ([B, num_slots, 1, H, W]) — the actual spatial slot masks
+        out_slot    = slot_dec({'latent': slots})
+        slot_logits = out_slot['reconstruction']          # [B, 10, H, W]
+        slot_recon  = slot_logits.argmax(1)              # [B, H, W]
+
+        # Alphas: [B, num_slots, 1, H, W] → [B, num_slots, H, W]
+        alphas = out_slot.get('alphas', None)
+        if alphas is not None:
+            masks_np = alphas.squeeze(2).cpu().numpy()   # (B, num_slots, H, W)
+        else:
+            # Fallback: uniform mask if decoder doesn't expose alphas
+            masks_np = np.ones((B, num_slots,
+                                cfg['grid_size'], cfg['grid_size'])) / num_slots
+
+        # ── Baseline forward ──────────────────────────────────────────────────
+        z_base = base_enc({'state': states})['latent']
         out_base = base_dec({'latent': z_base})
-        base_logits = out_base.get('reconstructed_logits', out_base.get('reconstruction'))
-        base_recon  = base_logits.argmax(1)
+        base_key    = next((k for k in ('reconstructed_logits','reconstruction')
+                            if k in out_base), list(out_base.keys())[0])
+        base_recon  = out_base[base_key].argmax(1)      # [B, H, W]
 
-        target = states.squeeze(1).long()   # [B, 30, 30]
-
-        slot_mask_store.append(masks.cpu())
-        slot_latent_store.append(slots.cpu())
+        target = states.squeeze(1).long()               # [B, H, W]
 
         for b in range(B):
             if len(results) >= n_grids:
                 break
-            tgt  = target[b].cpu().numpy()
-            sr   = slot_recon[b].cpu().numpy()
-            br   = base_recon[b].cpu().numpy()
+            tgt = target[b].cpu().numpy()
+            sr  = slot_recon[b].cpu().numpy()
+            br  = base_recon[b].cpu().numpy()
             results.append({
                 'input':      tgt,
                 'slot_recon': sr,
                 'base_recon': br,
                 'slot_acc':   float((tgt == sr).mean()),
                 'base_acc':   float((tgt == br).mean()),
-                'masks':      masks[b].cpu().numpy(),    # (num_slots, Ph, Pw)
-                'slots':      slots[b].cpu().numpy(),    # (num_slots, D)
+                'masks':      masks_np[b],          # (num_slots, H, W)
+                'slots':      slots[b].cpu().numpy(),
             })
 
-    return results, slot_mask_store, slot_latent_store
+    return results, [], []
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -267,47 +273,38 @@ def run_slot_inference(slot_enc, slot_dec, base_enc, base_dec,
 def plot_slot_mask_gallery(results, slot_cfg, cfg, out_dir, n_show=8):
     """Panel 1: For each grid show input + one subplot per slot (attention mask)."""
     print("🎭 Slot mask gallery...")
-    num_slots  = slot_cfg['num_slots']
-    patch_size = slot_cfg['patch_size']
-    Ph         = cfg['grid_size'] // patch_size
-
-    n_show = min(n_show, len(results))
-    # Each row: input + num_slots masks
-    ncols = num_slots + 1
-    nrows = n_show
-
+    num_slots = slot_cfg['num_slots']
+    n_show    = min(n_show, len(results))
+    ncols     = num_slots + 1
+    nrows     = n_show
     cmap_mask = plt.cm.hot
+    slot_colors = plt.cm.tab20(np.linspace(0, 1, num_slots))
 
     fig, axes = plt.subplots(nrows, ncols,
                               figsize=(ncols * 1.4, nrows * 1.6))
     if nrows == 1:
         axes = axes[np.newaxis, :]
 
-    slot_colors = plt.cm.tab20(np.linspace(0, 1, num_slots))
-
     for row, r in enumerate(results[:n_show]):
-        # Input grid
         axes[row, 0].imshow(r['input'], cmap=ARC_CMAP, vmin=0, vmax=9,
                             interpolation='nearest')
         acc_s = r['slot_acc'] * 100
         axes[row, 0].set_title(f'Input\nSlot {acc_s:.0f}%', fontsize=7)
         axes[row, 0].axis('off')
 
-        # One column per slot — upsample mask to full grid size
         for s in range(num_slots):
             ax  = axes[row, s + 1]
-            msk = r['masks'][s]   # (Ph, Pw)
-            # Upsample to 30×30 for overlay readability
-            msk_up = np.kron(msk, np.ones((patch_size, patch_size)))[:cfg['grid_size'], :cfg['grid_size']]
+            # masks are already full-res [H, W] from SemanticDecoder alphas
+            msk = r['masks'][s]
             ax.imshow(r['input'], cmap=ARC_CMAP, vmin=0, vmax=9,
                       interpolation='nearest', alpha=0.35)
-            ax.imshow(msk_up, cmap=cmap_mask, alpha=0.65, interpolation='nearest')
+            ax.imshow(msk, cmap=cmap_mask, alpha=0.65, interpolation='nearest')
             if row == 0:
                 ax.set_title(f'S{s}', fontsize=7,
                              color=to_hex(slot_colors[s]))
             ax.axis('off')
 
-    fig.suptitle(f'Slot Attention Masks  ({num_slots} slots, patch_size={patch_size})',
+    fig.suptitle(f'Slot Attention Masks  ({num_slots} slots)',
                  fontsize=13)
     plt.tight_layout()
     path = os.path.join(out_dir, '1_slot_masks.png')
@@ -369,25 +366,18 @@ def plot_reconstruction_compare(results, out_dir, n_show=12, cols=3):
 def plot_slot_specialisation(results, slot_cfg, cfg, out_dir):
     """Panel 3: For each slot, what is the dominant ARC colour in its attended patches?"""
     print("🔬 Slot specialisation analysis...")
-    num_slots  = slot_cfg['num_slots']
-    patch_size = slot_cfg['patch_size']
-    Ph = cfg['grid_size'] // patch_size
+    num_slots = slot_cfg['num_slots']
 
-    # For each slot, collect the input colours at its highest-attention patches
-    # mask: (num_slots, Ph, Pw)
     slot_colour_hist = np.zeros((num_slots, 10), dtype=np.float64)
     slot_mean_attn   = np.zeros(num_slots)
 
     for r in results:
-        inp  = r['input']   # (30, 30)
+        inp = r['input']   # (30, 30)
         for s in range(num_slots):
-            msk = r['masks'][s]   # (Ph, Pw)
+            msk = r['masks'][s]   # (H, W) — full-res from SemanticDecoder alphas
             slot_mean_attn[s] += msk.mean()
-            # Upsample mask and sample colours under it
-            msk_up = np.kron(msk, np.ones((patch_size, patch_size)))[:cfg['grid_size'], :cfg['grid_size']]
-            # Weight colour occurrences by attention weight
             for c in range(10):
-                slot_colour_hist[s, c] += (msk_up * (inp == c)).sum()
+                slot_colour_hist[s, c] += (msk * (inp == c)).sum()
 
     # Normalise
     total = slot_colour_hist.sum(1, keepdims=True)
