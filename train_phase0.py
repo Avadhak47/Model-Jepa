@@ -139,7 +139,7 @@ CFG = {
     #   num_shape_codes: 256→512
     #   num_slots: 10→16, slot_iters: 5→7
     # All of these change weight shapes — must start from scratch.
-    'p0_resume_from': None,
+    'p0_resume_from': "runs/FactorizedFPS-v5_2026-04-25_01-41-09/phase0/latest_checkpoint.pth",
     'p1_resume_from': None,
 }
 
@@ -291,6 +291,7 @@ def train_phase_0(cfg, p0_dir, wb_run, dataset):
 
     start_epoch   = 1
     post_surg_cd  = 0
+    epoch         = 0
 
     # ── Resume ──────────────────────────────────────────────────────────────
     resume = cfg.get('p0_resume_from') or (ckpt_path if os.path.exists(ckpt_path) else None)
@@ -301,6 +302,7 @@ def train_phase_0(cfg, p0_dir, wb_run, dataset):
             model.load_state_dict(ckpt['model'], strict=False)
             opt.load_state_dict(ckpt['opt'])
             start_epoch = ckpt['epoch'] + 1
+            epoch = ckpt['epoch']
             print(f"   ✅ Resumed from epoch {ckpt['epoch']}.")
         except Exception as e:
             print(f"   ⚠️  Incompatible checkpoint, starting fresh. ({e})")
@@ -687,8 +689,15 @@ def main(cfg: dict):
     check_gpu_memory(min_free_gb=4.0)
     print(f"🖥️  Device: {device}")
 
-
-    root_dir, p0_dir, p1_dir = make_run_dir(cfg)
+    # --- Resume Logic: Check for most recent directory if resume is true ---
+    resume_run = cfg.get('resume_run_dir')
+    if resume_run:
+        root_dir = resume_run
+        p0_dir = os.path.join(root_dir, 'phase0')
+        p1_dir = os.path.join(root_dir, 'phase1')
+        print(f"🔄 Resuming from existing run folder: {root_dir}")
+    else:
+        root_dir, p0_dir, p1_dir = make_run_dir(cfg)
 
     # Base generative priors
     train_dataset = ReARCDataset(data_path=cfg['data_path'])
