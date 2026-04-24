@@ -162,7 +162,7 @@ class PatchTransformerEncoder(BaseEncoder):
         self.patch_embed = nn.Conv2d(self.in_channels, embed_dim, kernel_size=self.patch_size, stride=self.patch_size)
         
         # Relational Patch Pre-Contextualization with RoPE
-        self.rope_attn = RoPESelfAttention(embed_dim, num_heads=4, grid_size=self.grid_size)
+        self.rope_attn = RoPESelfAttention(embed_dim, num_heads=8, grid_size=self.grid_size)
         
         self.projector = nn.Sequential(
             nn.LayerNorm(embed_dim),

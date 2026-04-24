@@ -118,7 +118,7 @@ class PatchDecoder(TransformerDecoder):
             batch_first=True,
             norm_first=True
         )
-        self.transformer = nn.TransformerEncoder(dec_layer, num_layers=2, enable_nested_tensor=False)
+        self.transformer = nn.TransformerEncoder(dec_layer, num_layers=6, enable_nested_tensor=False)
 
         self.pixel_generator = nn.Sequential(
             nn.ConvTranspose2d(self.full_dim, self.hidden_dim, kernel_size=self.patch_size, stride=self.patch_size),

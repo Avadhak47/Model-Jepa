@@ -1,0 +1,38 @@
+{
+  "architecture": {
+    "patch_size": 5,
+    "hidden_dim": 128,
+    "latent_dim": 128,
+    "num_shape_codes": 512,
+    "num_color_codes": 16,
+    "vocab_size": 10,
+    "grid_size": 30,
+    "in_channels": 10,
+    "focal_gamma": 2.0,
+    "commitment_cost": 0.25,
+    "device": "cuda",
+    "data_path": "arc_data/re-arc"
+  },
+  "n_grids_evaluated": 300,
+  "mean_pixel_acc": 0.871962962962963,
+  "median_pixel_acc": 0.9133333333333333,
+  "std_pixel_acc": 0.11248446928311472,
+  "perfect_reconstructions": 0,
+  "perfect_pct": 0.0,
+  "per_colour_accuracy": {
+    "Black": 0.8925675998534651,
+    "Blue": 0.7946069994262766,
+    "Red": 0.8846016434440872,
+    "Green": 0.7935537190082644,
+    "Yellow": 0.8066197550169403,
+    "Grey": 0.844644890095455,
+    "Magenta": 0.8585286984640259,
+    "Orange": 0.8152199762187872,
+    "Cyan": 0.8078232947358178,
+    "Maroon": 0.765203099319089
+  },
+  "shape_codes_active": 434,
+  "color_codes_active": 16,
+  "shape_codebook_size": 512,
+  "color_codebook_size": 16
+}
