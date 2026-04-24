@@ -130,7 +130,7 @@ CFG = {
     'data_path':            'arc_data/re-arc/tasks',
     'arc_heavy_path':       'arc_data/arc-heavy/training',
     'eval_data_path':       'arc_data/original/evaluation',
-    'val_batch_size':       40,
+    'val_batch_size':       50,
 
     # Resume — fresh run.
     # ⚠️  Architecture changed v4→v5:
@@ -223,6 +223,27 @@ def init_wandb(cfg, run_dir, phase_tag, wb_run=None):
 # ═══════════════════════════════════════════════════════════════════════════
 # MODELS
 # ═══════════════════════════════════════════════════════════════════════════
+def vicreg_loss(z, var_weight=25.0, cov_weight=1.0):
+    """
+    VICReg: Variance-Invariance-Covariance Regularization
+    Prevents collapse without requiring negative samples.
+    """
+    B, N, D = z.shape
+    z = z.reshape(B * N, D)
+    
+    # 1. Variance Loss: Std of each dimension should be >= 1
+    std = torch.sqrt(z.var(dim=0) + 1e-04)
+    v_loss = torch.mean(F.relu(1.0 - std))
+    
+    # 2. Covariance Loss: Off-diagonals of Cov(z) should be zero
+    z_norm = z - z.mean(dim=0)
+    cov = (z_norm.T @ z_norm) / (max(B * N - 1, 1))
+    diag = torch.eye(D, device=z.device)
+    c_loss = (cov * (1 - diag)).pow(2).sum() / D
+    
+    return var_weight * v_loss + cov_weight * c_loss
+
+
 class Phase0Autoencoder(nn.Module):
     def __init__(self, cfg):
         super().__init__()
@@ -275,8 +296,8 @@ def train_phase_0(cfg, p0_dir, wb_run, dataset):
     resume = cfg.get('p0_resume_from') or (ckpt_path if os.path.exists(ckpt_path) else None)
     if resume and os.path.exists(resume):
         print(f"📥 P0 resuming from {resume}...")
-        ckpt = torch.load(resume, map_location=device, weights_only=False)
         try:
+            ckpt = torch.load(resume, map_location=device, weights_only=False)
             model.load_state_dict(ckpt['model'], strict=False)
             opt.load_state_dict(ckpt['opt'])
             start_epoch = ckpt['epoch'] + 1
@@ -319,8 +340,13 @@ def train_phase_0(cfg, p0_dir, wb_run, dataset):
             out, vq_loss, p_shape, p_color, z_vq = model({'state': state}, valid_mask=vmask, temperature=tau)
             loss_dict  = model.decoder.loss({'state': state}, out)
             
-            info_nce_loss = F.mse_loss(z_aligned, z_vq) # Forces structural invariance
-            total_loss = loss_dict['loss'] + vq_loss + vq_loss_rot + (1.0 * info_nce_loss)
+            # --- 3. Regularization & Final Loss ---
+            inv_loss = F.mse_loss(z_aligned, z_vq) # Positives: Invariance
+            
+            # Anti-collapse push (VICReg)
+            reg_loss = vicreg_loss(z_vq)
+            
+            total_loss = loss_dict['loss'] + vq_loss + vq_loss_rot + (10.0 * inv_loss) + (0.1 * reg_loss)
 
             if torch.isnan(total_loss) or torch.isinf(total_loss):
                 nan_streak += 1

@@ -21,7 +21,16 @@ class ARCDataset:
             print(f"Loaded {count} ARC JSON tasks from {data_path}")
         else:
             print(f"Warning: ARC path '{data_path}' not found. Generating minimal mock JSON structures.")
-            self.tasks.append({"train": [{"input": [[0,1],[1,0]], "output": [[1,0],[0,1]]}]})
+            rng = np.random.default_rng(1337)
+            # Create 5 distinct "tasks" to ensure it's not just one constant task
+            for tid in range(5):
+                task_train = []
+                for _ in range(3):
+                    sz = int(rng.integers(10, 20))
+                    inp = rng.integers(0, 10, (sz, sz)).tolist()
+                    out = rng.integers(0, 10, (sz, sz)).tolist()
+                    task_train.append({"input": inp, "output": out})
+                self.tasks.append({"train": task_train})
         
     def __len__(self):
         return len(self.tasks)
