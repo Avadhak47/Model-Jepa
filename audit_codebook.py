@@ -55,22 +55,27 @@ ARC_CMAP = ListedColormap(ARC_COLORS)
 # ═══════════════════════════════════════════════════════════════════════════
 # HELPERS
 # ═══════════════════════════════════════════════════════════════════════════
-def detect_patch_size(ckpt_path: str) -> int:
-    """
-    Read patch_size directly from the encoder's patch_embed Conv2d weight.
-    Weight shape: [out_ch, in_ch, kernel_h, kernel_w]  →  kernel_h == patch_size.
-    Falls back to 2 if the key is missing.
-    """
+def detect_arch_from_p0(ckpt_path: str) -> dict:
     ckpt  = torch.load(ckpt_path, map_location='cpu', weights_only=False)
     state = ckpt.get('model', ckpt)
-    for key in state:
-        if 'patch_embed.weight' in key:
-            # weight shape: [embed_dim, in_channels, patch_size, patch_size]
-            ps = state[key].shape[-1]
-            print(f"  🔎 Detected patch_size={ps} from '{key}' shape {tuple(state[key].shape)}")
-            return int(ps)
-    print("  ⚠️  Could not detect patch_size — defaulting to 2")
-    return 2
+    arch  = {'patch_size':2, 'hidden_dim':128, 'latent_dim':128,
+              'num_shape_codes':256, 'num_color_codes':16,
+              'vocab_size':10, 'grid_size':30, 'in_channels':10,
+              'focal_gamma':2.0, 'commitment_cost':0.25}
+    for key, val in state.items():
+        if 'encoder.patch_embed.weight' in key and val.dim() == 4:
+            arch['hidden_dim']  = val.shape[0]
+            arch['patch_size']  = val.shape[2]
+            print(f"  🔎 Detected patch_size={arch['patch_size']}, hidden_dim={arch['hidden_dim']} from '{key}'")
+        if 'encoder.projector' in key and 'weight' in key and val.dim() == 2:
+            arch['latent_dim']  = val.shape[0]
+        if 'vq.embedding_shape.weight' in key and val.dim() == 2:
+            arch['num_shape_codes'] = val.shape[0]
+            print(f"  🔎 Detected num_shape_codes={arch['num_shape_codes']} from '{key}'")
+        if 'vq.embedding_color.weight' in key and val.dim() == 2:
+            arch['num_color_codes'] = val.shape[0]
+            print(f"  🔎 Detected num_color_codes={arch['num_color_codes']} from '{key}'")
+    return arch
 
 def load_phase0(ckpt_path: str, cfg: dict, device: str):
     """Load the full Phase 0 autoencoder from a saved checkpoint."""
@@ -480,24 +485,10 @@ def main():
     print(f"   Output dir : {args.out}")
     print(f"   Device     : {args.device}")
 
-    # Auto-detect patch_size from the checkpoint so the audit always matches
-    # the architecture the model was actually trained with.
-    detected_patch_size = detect_patch_size(args.checkpoint)
-
-    CFG = {
-        'device':          args.device,
-        'in_channels':     10,
-        'patch_size':      detected_patch_size,          # ← auto-detected, not hardcoded
-        'hidden_dim':      128,
-        'latent_dim':      128,
-        'vocab_size':      10,
-        'grid_size':       30,
-        'focal_gamma':     2.0,
-        'num_shape_codes': 256,
-        'num_color_codes': 16,
-        'commitment_cost': 0.25,
-        'batch_size':      128,
-    }
+    # Auto-detect architecture dims from the checkpoint
+    CFG = detect_arch_from_p0(args.checkpoint)
+    CFG['device'] = args.device
+    CFG['batch_size'] = 128
     num_patches = (CFG['grid_size'] // CFG['patch_size']) ** 2
     print(f"   patch_size : {CFG['patch_size']}  →  {num_patches} patches per grid "
           f"({CFG['grid_size']//CFG['patch_size']}×{CFG['grid_size']//CFG['patch_size']})")
