@@ -395,15 +395,27 @@ def plot_geometry_heatmaps(shape_stats, out_dir):
     """Panel 5: per-code geometry stats as heatmaps (hits, entropy, edge magnitude, dominant colour)."""
     print("🗺️  Plotting geometry heatmaps...")
     N      = len(shape_stats)
-    side   = 16   # 16 × 16 = 256
-    hits   = np.array([s['hits']          for s in shape_stats]).reshape(side, side)
-    ent    = np.array([s['entropy']        for s in shape_stats]).reshape(side, side)
-    edge   = np.array([s['edge_mag']       for s in shape_stats]).reshape(side, side)
-    dom    = np.array([s['dominant_color'] for s in shape_stats]).reshape(side, side).astype(float)
+    # Flexible grid sizing: aim for 32 columns for large codebooks
+    side_w = 32 if N > 32 else N
+    side_h = (N + side_w - 1) // side_w
+    
+    # Pad stats list if not a perfect multiple
+    flat_hits = [s['hits'] for s in shape_stats]
+    flat_ent  = [s['entropy'] for s in shape_stats]
+    flat_edge = [s['edge_mag'] for s in shape_stats]
+    flat_dom  = [s['dominant_color'] for s in shape_stats]
+    
+    while len(flat_hits) < (side_w * side_h):
+        flat_hits.append(0); flat_ent.append(0.0); flat_edge.append(0.0); flat_dom.append(-1)
+
+    hits = np.array(flat_hits).reshape(side_h, side_w)
+    ent  = np.array(flat_ent).reshape(side_h, side_w)
+    edge = np.array(flat_edge).reshape(side_h, side_w)
+    dom  = np.array(flat_dom).reshape(side_h, side_w).astype(float)
     dom[dom < 0] = np.nan
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
-    fig.suptitle("Shape Codebook Geometry Analysis (16×16 layout of all 256 codes)",
+    fig, axes = plt.subplots(2, 2, figsize=(16, 4 + 4 * (side_h / 8)))
+    fig.suptitle(f"Shape Codebook Geometry Analysis ({side_h}×{side_w} layout of {N} codes)",
                  fontsize=14)
 
     def hmap(ax, data, title, cmap):
