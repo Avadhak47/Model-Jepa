@@ -570,17 +570,17 @@ def main():
     parser = argparse.ArgumentParser(
         description='Phase 1 slot model audit',
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=\"""
-Examples:
-  # Pass a run directory — checkpoints are auto-discovered:
-  python audit_phase1.py --run_dir runs/FactorizedFPS-v4_2026-04-24_04-57-55
-
-  # Or pass explicit checkpoint paths:
-  python audit_phase1.py \\
-    --slot_ckpt runs/.../phase1/latest_slot_checkpoint.pth \\
-    --base_ckpt runs/.../phase1/latest_base_checkpoint.pth \\
-    --p0_ckpt   runs/.../phase0/latest_checkpoint.pth
-"""
+        epilog=(
+            "Examples:\n"
+            "  # Pass a run directory -- checkpoints are auto-discovered:\n"
+            "  python audit_phase1.py --run_dir runs/FactorizedFPS-v4_2026-04-24_04-57-55\n"
+            "\n"
+            "  # Or pass explicit paths:\n"
+            "  python audit_phase1.py\n"
+            "    --slot_ckpt runs/.../phase1/latest_slot_checkpoint.pth\n"
+            "    --base_ckpt runs/.../phase1/latest_base_checkpoint.pth\n"
+            "    --p0_ckpt   runs/.../phase0/latest_checkpoint.pth\n"
+        )
     )
     # Option A: pass a run directory
     parser.add_argument('--run_dir',   type=str, default=None,
@@ -632,20 +632,20 @@ Examples:
 
     print(f"{'═'*55}")
     print(f"  Phase 1 Slot Audit")
-    print(f"  Slot ckpt  : {args.slot_ckpt}")
-    print(f"  Base ckpt  : {args.base_ckpt}")
-    print(f"  P0 ckpt    : {args.p0_ckpt}")
+    print(f"  Slot ckpt  : {slot_ckpt}")
+    print(f"  Base ckpt  : {base_ckpt}")
+    print(f"  P0 ckpt    : {p0_ckpt}")
     print(f"{'═'*55}\n")
 
     # ── Detect architecture ──────────────────────────────────────────────────
-    cfg         = detect_arch_from_p0(args.p0_ckpt)
+    cfg         = detect_arch_from_p0(p0_ckpt)
     cfg['device'] = device
-    slot_params = detect_slot_params(args.slot_ckpt)
+    slot_params = detect_slot_params(slot_ckpt)
 
     # ── Load models ──────────────────────────────────────────────────────────
     print("⚙️  Loading models...")
-    slot_enc, slot_dec, slot_cfg = load_slot_model(args.slot_ckpt, cfg, slot_params)
-    base_enc, base_dec           = load_baseline(args.base_ckpt, cfg)
+    slot_enc, slot_dec, slot_cfg = load_slot_model(slot_ckpt, cfg, slot_params)
+    base_enc, base_dec           = load_baseline(base_ckpt, cfg)
 
     # ── Dataset ──────────────────────────────────────────────────────────────
     from arc_data.rearc_dataset import ReARCDataset
