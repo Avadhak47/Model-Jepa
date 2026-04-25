@@ -139,8 +139,8 @@ CFG = {
     #   num_shape_codes: 256→512
     #   num_slots: 10→16, slot_iters: 5→7
     # All of these change weight shapes — must start from scratch.
-    'p0_resume_from': "runs/FactorizedFPS-v5_2026-04-25_01-41-09/phase0/latest_checkpoint.pth",
-    'p1_resume_from': None,
+    'p0_resume_from': "runs/FactorizedFPS-v5_2026-04-25_04-37-07/phase0/latest_checkpoint.pth",
+    'p1_resume_from': "runs/FactorizedFPS-v5_2026-04-25_04-37-07/phase1/latest_slot_checkpoint.pth"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
