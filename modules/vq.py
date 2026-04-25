@@ -8,11 +8,18 @@ class FactorizedVectorQuantizer(nn.Module):
     Splits the continuous vector into two distinct dictionaries to force
     unsupervised categorization of high-variance (Shape) and low-variance (Color/Texture).
     
+    Semantic Partitioning:
+      - Shape codes 0..(N_BG-1)  → reserved for background (zero) patches
+      - Shape codes N_BG..511    → foreground object primitives
+    
     Includes:
     - Padding-masked perplexity: excludes padded zero-patches from entropy calculation
     - Padding-filtered surgery pool: dead code reset only samples real content patches
+    - Affinity loss: patches from same connected component share same shape code
     """
-    def __init__(self, num_shape_codes=256, num_color_codes=16, embedding_dim=128, commitment_cost=0.25):
+    N_BG_CODES = 16  # First 16 shape codes are reserved for background
+
+    def __init__(self, num_shape_codes=512, num_color_codes=16, embedding_dim=128, commitment_cost=0.25):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.half_dim = embedding_dim // 2
@@ -33,21 +40,35 @@ class FactorizedVectorQuantizer(nn.Module):
         self.register_buffer('shape_usage', torch.zeros(self.num_shape_codes))
         self.register_buffer('color_usage', torch.zeros(self.num_color_codes))
 
-    def _quantize(self, flat_input, embedding_layer, num_codes, usage_buffer=None, valid_mask=None, temperature=1.0):
+    def _quantize(self, flat_input, embedding_layer, num_codes, usage_buffer=None,
+                  valid_mask=None, temperature=1.0, force_bg_mask=None):
         """
-
-        valid_mask: Optional bool tensor [N_total] — True for real patches, False for padding.
-        When provided, perplexity is calculated ONLY over real (non-padded) patches.
-        This prevents padded zeros from dominating entropy and falsely suppressing perplexity.
+        valid_mask    : bool [N_total] — True for real patches, False for padding.
+        force_bg_mask : bool [N_total] — True for background (all-zero) patches.
+                        If set, these patches are restricted to choose only from
+                        codes 0..N_BG_CODES-1, reserving upper codes for foreground.
         """
         # Calculate Euclidean distances
         distances = (torch.sum(flat_input**2, dim=1, keepdim=True) 
                     + torch.sum(embedding_layer.weight**2, dim=1)
                     - 2 * torch.matmul(flat_input, embedding_layer.weight.t()))
-                    
+        
+        logits = -distances  # closest code = highest logit
+        
+        # Semantic Partitioning: Mask foreground codes for background patches.
+        # Background patches ONLY compete among the first N_BG_CODES.
+        # This reserves codes [N_BG..num_codes) exclusively for foreground objects.
+        if force_bg_mask is not None and force_bg_mask.any() and num_codes == self.num_shape_codes:
+            fg_mask = torch.ones(num_codes, dtype=torch.bool, device=flat_input.device)
+            fg_mask[:self.N_BG_CODES] = False  # first N_BG are BG-only
+            # For background patches: set foreground code logits to -inf
+            logits[force_bg_mask, :] = logits[force_bg_mask, :].masked_fill(fg_mask, float('-inf'))
+            # For foreground patches: set background code logits to -inf
+            if (~force_bg_mask).any():
+                bg_mask = ~fg_mask
+                logits[~force_bg_mask, :] = logits[~force_bg_mask, :].masked_fill(bg_mask, float('-inf'))
+                     
         # Encode using Gumbel-Softmax (Straight-Through Estimator)
-        # Logits are negative distances (closest code = highest logit)
-        logits = -distances
         encodings = F.gumbel_softmax(logits, tau=temperature, hard=True)
         # For tracking true argmin hits (needed for usage buffers)
         encoding_indices = encodings.argmax(dim=1).unsqueeze(1)
@@ -64,7 +85,6 @@ class FactorizedVectorQuantizer(nn.Module):
             usage_buffer.scatter_add_(0, real_indices, torch.ones_like(real_indices, dtype=torch.float))
             
         # Perplexity: computed ONLY over real (non-padded) patches
-        # This is the research-recommended fix for padding-inflated perplexity suppression
         if valid_mask is not None:
             real_encodings = encodings[valid_mask]
         else:
@@ -73,7 +93,104 @@ class FactorizedVectorQuantizer(nn.Module):
         avg_probs = torch.mean(real_encodings, dim=0)
         perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
         
-        return quantized, perplexity
+        return quantized, perplexity, encoding_indices.view(-1)
+
+    @staticmethod
+    def affinity_loss(shape_indices, state, patch_size, grid_hw):
+        """
+        Connected Component Affinity Loss.
+        Patches from the same connected foreground object should share the same shape code.
+        Patches from different objects should use different shape codes.
+
+        Args:
+            shape_indices : LongTensor [B*N] — argmax shape code per patch
+            state         : FloatTensor [B, 1, H, W] — original ARC grid (values 0–9)
+            patch_size    : int
+            grid_hw       : int — number of patches per side (H//patch_size)
+        Returns:
+            scalar loss
+        """
+        import numpy as np
+        from scipy import ndimage
+
+        B_N = shape_indices.shape[0]
+        B   = state.shape[0]
+        N   = B_N // B  # patches per image
+        device = shape_indices.device
+
+        pos_pairs = []  # (i, j) same object → codes should match
+        neg_pairs = []  # (i, j) different objects → codes should differ
+
+        for b in range(B):
+            grid = state[b, 0].cpu().numpy().astype(int)  # [H, W]
+            # Label connected components for each non-zero color separately
+            label_map = np.zeros_like(grid, dtype=int)
+            next_label = 1
+            for color in range(1, 10):
+                mask = (grid == color)
+                if not mask.any():
+                    continue
+                labeled, n_comp = ndimage.label(mask)
+                label_map[mask] = labeled[mask] + next_label - 1
+                next_label += n_comp
+
+            # Assign each patch its dominant label
+            offset = b * N
+            patch_labels = []
+            for pi in range(grid_hw):
+                for pj in range(grid_hw):
+                    r0, c0 = pi * patch_size, pj * patch_size
+                    patch = label_map[r0:r0+patch_size, c0:c0+patch_size]
+                    vals, counts = np.unique(patch.flatten(), return_counts=True)
+                    dominant = vals[counts.argmax()]
+                    patch_labels.append(dominant)
+
+            # Build pairs
+            for i in range(N):
+                for j in range(i + 1, N):
+                    li, lj = patch_labels[i], patch_labels[j]
+                    if li == 0 or lj == 0:
+                        continue  # skip background-background pairs
+                    if li == lj:
+                        pos_pairs.append((offset + i, offset + j))
+                    else:
+                        neg_pairs.append((offset + i, offset + j))
+
+        if not pos_pairs and not neg_pairs:
+            return torch.tensor(0.0, device=device, requires_grad=True)
+
+        # Limit pair count to avoid O(N^2) explosion
+        rng = np.random.default_rng()
+        max_pairs = 512
+        if len(pos_pairs) > max_pairs:
+            pos_pairs = [pos_pairs[i] for i in rng.choice(len(pos_pairs), max_pairs, replace=False)]
+        if len(neg_pairs) > max_pairs:
+            neg_pairs = [neg_pairs[i] for i in rng.choice(len(neg_pairs), max_pairs, replace=False)]
+
+        total_loss = torch.tensor(0.0, device=device)
+        count = 0
+
+        # Same-object pairs: code indices should be the same → cross-entropy-like push
+        for (i, j) in pos_pairs:
+            ci = shape_indices[i].unsqueeze(0)  # [1]
+            cj = shape_indices[j].unsqueeze(0)
+            # Soft push: penalise if they chose different codes
+            if ci.item() != cj.item():
+                total_loss = total_loss + 1.0
+                count += 1
+
+        # Different-object pairs: code indices should differ → penalise if same
+        for (i, j) in neg_pairs:
+            ci = shape_indices[i].unsqueeze(0)
+            cj = shape_indices[j].unsqueeze(0)
+            if ci.item() == cj.item():
+                total_loss = total_loss + 1.0
+                count += 1
+
+        if count == 0:
+            return torch.tensor(0.0, device=device)
+
+        return total_loss / count
 
     def forward(self, inputs, valid_mask=None, temperature=1.0):
         """
@@ -85,7 +202,6 @@ class FactorizedVectorQuantizer(nn.Module):
         """
         is_spatial = inputs.dim() == 4
         if is_spatial:
-            # Convert [B, C, H, W] to [B, H, W, C]
             inputs_perm = inputs.permute(0, 2, 3, 1).contiguous()
         else:
             inputs_perm = inputs.contiguous()
@@ -95,16 +211,20 @@ class FactorizedVectorQuantizer(nn.Module):
         # Flatten valid_mask to [B*N] to align with flat_input
         flat_valid_mask = valid_mask.view(-1) if valid_mask is not None else None
         
+        # Background mask: patches with ALL zero values (padding OR empty ARC cell)
+        flat_bg_mask = (flat_input.abs().sum(dim=-1) < 1e-6)
+        
         # Factorize the vector
         flat_shape = flat_input[:, :self.half_dim]
         flat_color = flat_input[:, self.half_dim:]
         
         # Quantize independently (both receive the same spatial valid_mask)
-        quantized_shape, perp_shape = self._quantize(
+        quantized_shape, perp_shape, shape_idx = self._quantize(
             flat_shape, self.embedding_shape, self.num_shape_codes,
-            self.shape_usage, flat_valid_mask, temperature=temperature
+            self.shape_usage, flat_valid_mask, temperature=temperature,
+            force_bg_mask=flat_bg_mask
         )
-        quantized_color, perp_color = self._quantize(
+        quantized_color, perp_color, _ = self._quantize(
             flat_color, self.embedding_color, self.num_color_codes,
             self.color_usage, flat_valid_mask, temperature=temperature
         )
@@ -124,15 +244,13 @@ class FactorizedVectorQuantizer(nn.Module):
             
         loss = q_latent_loss + self.commitment_cost * e_latent_loss
         
-        # With Gumbel-Softmax, we no longer need the non-differentiable STE trick.
-        # The gradients flow naturally through `quantized_flat` (matrix multiplication
-        # of the soft one-hot encodings and the codebook).
         quantized = quantized_flat.view(inputs_perm.shape)
         
         if is_spatial:
+            quantized = quantized.permute(0, 2, 3, 1  if False else 1).contiguous()
             quantized = quantized.permute(0, 3, 1, 2).contiguous()
             
-        return quantized, loss, perp_shape, perp_color
+        return quantized, loss, perp_shape, perp_color, shape_idx
 
     @torch.no_grad()
     def get_farthest_point_samples(self, target_slots=10):

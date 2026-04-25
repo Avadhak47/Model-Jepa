@@ -118,13 +118,14 @@ CFG = {
     'p0_stop_recon':        0.05,
 
     # Phase 1 training
-    'p1_epochs':            1000,
+    'p1_epochs':            2000,
     'p1_steps':             100,
     'p1_batch':             64,
-    'p1_lr':                4e-4,
+    'p1_lr':                1e-4,
     'p1_grad_clip':         1.0,
     'p1_save_interval':     10,
     'p1_val_interval':      10,     # Run validation every N epochs
+    'codebook_warmup_epochs': 100,  # Freeze codebook for first N Phase 1 epochs
 
     # Data paths
     'data_path':            'arc_data/re-arc/tasks',
@@ -263,12 +264,12 @@ class Phase0Autoencoder(nn.Module):
         z_pose = enc_out['latent_pose']
         
         # Soft-routing quantization (Straight-Through Gumbel Softmax)
-        z_q, vq_loss, p_shape, p_color = self.vq(z_vq, valid_mask=valid_mask, temperature=temperature)
+        z_q, vq_loss, p_shape, p_color, shape_idx = self.vq(z_vq, valid_mask=valid_mask, temperature=temperature)
         
         # Feature combinations (Structural Identity + Continuous Orientation)
         latent_combined = torch.cat([z_q, z_pose], dim=-1)
         out = self.decoder({'latent': latent_combined})
-        return out, vq_loss, p_shape, p_color, z_vq
+        return out, vq_loss, p_shape, p_color, z_vq, shape_idx
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -333,22 +334,37 @@ def train_phase_0(cfg, p0_dir, wb_run, dataset):
             k = torch.randint(1, 4, (1,)).item()
             state_rot = torch.rot90(state, k=k, dims=[2, 3])
             vmask_rot = torch.rot90(vmask.view(B, 6, 6), k=k, dims=[1, 2]).reshape(B, 36)
-            _, vq_loss_rot, _, _, z_vq_rot = model({'state': state_rot}, valid_mask=vmask_rot, temperature=tau)
+            _, vq_loss_rot, _, _, z_vq_rot, _shape_idx_rot = model({'state': state_rot}, valid_mask=vmask_rot, temperature=tau)
             
             # Align augmented patch grids: rotate back to calculate point-wise contrastive MSE
             z_aligned = torch.rot90(z_vq_rot.view(B, 6, 6, -1).permute(0, 3, 1, 2), k=-k, dims=[2, 3]).flatten(2).transpose(1, 2)
             
             # --- 2. Standard State Pathway ---
-            out, vq_loss, p_shape, p_color, z_vq = model({'state': state}, valid_mask=vmask, temperature=tau)
+            out, vq_loss, p_shape, p_color, z_vq, shape_idx = model({'state': state}, valid_mask=vmask, temperature=tau)
             loss_dict  = model.decoder.loss({'state': state}, out)
+
+            # --- 3. Affinity Loss (Object-Centric Codebook Alignment) ---
+            # Patches from same connected component → same shape code.
+            # Computed every 5 steps (scipy CC-labeling runs on CPU).
+            aff_loss = torch.tensor(0.0, device=device)
+            if _ % 5 == 0:
+                grid_hw = cfg['grid_size'] // cfg['patch_size']
+                try:
+                    aff_loss = FactorizedVectorQuantizer.affinity_loss(
+                        shape_idx, state, cfg['patch_size'], grid_hw
+                    ).to(device)
+                except Exception:
+                    pass  # skip if scipy not available on this batch
+
+            # --- 4. Regularization & Final Loss ---
+            inv_loss = F.mse_loss(z_aligned, z_vq)  # Positives: Invariance
+            reg_loss = vicreg_loss(z_vq)             # Anti-collapse (VICReg)
             
-            # --- 3. Regularization & Final Loss ---
-            inv_loss = F.mse_loss(z_aligned, z_vq) # Positives: Invariance
-            
-            # Anti-collapse push (VICReg)
-            reg_loss = vicreg_loss(z_vq)
-            
-            total_loss = loss_dict['loss'] + vq_loss + vq_loss_rot + (10.0 * inv_loss) + (0.1 * reg_loss)
+            total_loss = (loss_dict['loss']
+                         + vq_loss + vq_loss_rot
+                         + (10.0 * inv_loss)
+                         + (0.1  * reg_loss)
+                         + (0.5  * aff_loss))
 
             if torch.isnan(total_loss) or torch.isinf(total_loss):
                 nan_streak += 1
@@ -494,6 +510,20 @@ def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset, s
     for epoch in range(start_epoch, cfg['p1_epochs'] + 1):
         slot_enc.train(); slot_dec.train()
         base_enc.train(); base_dec.train()
+
+        # ── Codebook Warmup Freeze ────────────────────────────────────────
+        # For the first `codebook_warmup_epochs` epochs, freeze the injected
+        # codebook weights so the slot encoder learns to USE the Phase 0
+        # primitives, not destroy them.
+        warmup = cfg.get('codebook_warmup_epochs', 100)
+        if hasattr(slot_enc, 'codebook_shape'):
+            freeze = (epoch <= warmup)
+            slot_enc.codebook_shape.requires_grad_(not freeze)
+            slot_enc.codebook_color.requires_grad_(not freeze)
+            if epoch == warmup + 1:
+                print(f"\n🔓 P1 E{epoch}: Codebook unfrozen — entering joint fine-tune stage.")
+            elif epoch == 1:
+                print(f"   🔒 Codebook FROZEN for first {warmup} Phase 1 epochs.")
 
         # ── Temperature annealing schedule ────────────────────────────────
         # Linear interpolation from slot_temp_start → slot_temp_end over
