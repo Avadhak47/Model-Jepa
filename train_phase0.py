@@ -35,15 +35,19 @@ References:
   - MESH (ICML 2023): Sinkhorn entropy for slot sharpness
 
 Usage:
-  python train_phase0.py
-
+  python train_phase0.py                        # fresh run
+  python train_phase0.py --resume-run runs/ObjectCodebook-v1_2026-04-26_14-13-43
+  python train_phase0.py --resume-p0 runs/.../phase0/latest_checkpoint.pth
+  python train_phase0.py --resume-p1 runs/.../phase1/latest_slot_checkpoint.pth
+  python train_phase0.py --skip-p0  --resume-p1 runs/.../phase1/latest_slot_checkpoint.pth
+  python train_phase0.py --p0-epochs 0 --p1-epochs 500   # override epoch counts
 All outputs saved to runs/<run_name>_<timestamp>/
 """
 
 import sys, os
 os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 
-import signal, json, datetime, math
+import signal, json, datetime, math, argparse
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -1036,4 +1040,69 @@ def main(cfg: dict):
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(
+        description='NS-ARC Object Codebook Training (Phase 0 + Phase 1)',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    # ── Resume helpers ───────────────────────────────────────────────────────
+    parser.add_argument(
+        '--resume-run', metavar='RUN_DIR',
+        help='Root run directory (e.g. runs/ObjectCodebook-v1_2026-04-26_14-13-43). '
+             'Auto-loads latest_checkpoint.pth from phase0/ and '
+             'latest_slot_checkpoint.pth from phase1/.',
+    )
+    parser.add_argument(
+        '--resume-p0', metavar='CKPT',
+        help='Path to a specific Phase 0 checkpoint .pth to resume from.',
+    )
+    parser.add_argument(
+        '--resume-p1', metavar='CKPT',
+        help='Path to a specific Phase 1 slot checkpoint .pth to resume from.',
+    )
+    # ── Skip phases ──────────────────────────────────────────────────────────
+    parser.add_argument(
+        '--skip-p0', action='store_true',
+        help='Skip Phase 0 entirely (requires --resume-run or a frozen codebook to already exist).',
+    )
+    # ── Epoch overrides ──────────────────────────────────────────────────────
+    parser.add_argument('--p0-epochs', type=int, metavar='N',
+                        help='Override CFG["p0_epochs"].')
+    parser.add_argument('--p1-epochs', type=int, metavar='N',
+                        help='Override CFG["p1_epochs"].')
+
+    args = parser.parse_args()
+
+    # ── Apply CLI overrides to CFG ────────────────────────────────────────
+    if args.resume_run:
+        run_dir = args.resume_run.rstrip('/')
+        p0_ckpt = os.path.join(run_dir, 'phase0', 'latest_checkpoint.pth')
+        p1_ckpt = os.path.join(run_dir, 'phase1', 'latest_slot_checkpoint.pth')
+        if os.path.exists(p0_ckpt):
+            CFG['p0_resume_from'] = p0_ckpt
+            print(f"📂 Resuming Phase 0 from: {p0_ckpt}")
+        if os.path.exists(p1_ckpt):
+            CFG['p1_resume_from'] = p1_ckpt
+            print(f"📂 Resuming Phase 1 from: {p1_ckpt}")
+        CFG['resume_run_dir'] = run_dir
+
+    if args.resume_p0:
+        CFG['p0_resume_from'] = args.resume_p0
+        print(f"📂 Phase 0 checkpoint: {args.resume_p0}")
+
+    if args.resume_p1:
+        CFG['p1_resume_from'] = args.resume_p1
+        print(f"📂 Phase 1 checkpoint: {args.resume_p1}")
+
+    if args.skip_p0:
+        CFG['p0_epochs'] = 0
+        print("⏭️  Skipping Phase 0 (p0_epochs set to 0).")
+
+    if args.p0_epochs is not None:
+        CFG['p0_epochs'] = args.p0_epochs
+        print(f"🔧 p0_epochs overridden to {args.p0_epochs}")
+
+    if args.p1_epochs is not None:
+        CFG['p1_epochs'] = args.p1_epochs
+        print(f"🔧 p1_epochs overridden to {args.p1_epochs}")
+
     main(CFG)
