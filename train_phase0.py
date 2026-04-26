@@ -110,7 +110,7 @@ CFG = {
     'p0_batch':             128,          # Batch size (SLATE: 64-128)
     'p0_lr':                4e-4,         # Adam learning rate (SLATE: 3e-4 to 1e-3)
     'p0_lr_post_surgery':   1e-4,         # LR after codebook surgery
-    'p0_lr_warmup_epochs':  2,            # Epochs at reduced LR after surgery
+    'p0_lr_warmup_epochs':  3,            # Epochs at reduced LR after surgery
     'p0_grad_clip':         2.0,          # Gradient clip (conservative for VQ)
     'p0_save_interval':     25,
 
@@ -133,16 +133,16 @@ CFG = {
 
     # Temperature schedule (linear anneal, Locatello et al. 2020)
     'slot_temp_start':      1.0,          # High temp = exploratory (soft masks)
-    'slot_temp_end':        0.1,          # Low temp = sharp (hard object masks)
+    'slot_temp_end':        0.05,          # Low temp = sharp (hard object masks)
     'slot_temp_anneal':     400,          # Epochs over which to anneal
-    'slot_temperature':     0.1,          # Fallback if annealing disabled
+    'slot_temperature':     0.05,          # Fallback if annealing disabled
 
     # ── Phase 1 Training ─────────────────────────────────────────────────
     # Literature: Object-centric models typically need 300-500k steps.
     # ARC is simpler but we need discrete codebook convergence.
     'p1_epochs':            2000,
     'p1_steps':             200,          # Steps per epoch
-    'p1_batch':             64,
+    'p1_batch':             128,
     'p1_lr':                1e-4,         # Lower LR than P0 (fine-tuning codebook)
     'p1_grad_clip':         1.0,
     'p1_save_interval':     25,
@@ -172,7 +172,7 @@ CFG = {
     'data_path':            'arc_data/re-arc/tasks',
     'arc_heavy_path':       'arc_data/arc-heavy/training',
     'eval_data_path':       'arc_data/original/evaluation',
-    'val_batch_size':       64,
+    'val_batch_size':       128,
 
     # ── Resume ────────────────────────────────────────────────────────────
     'p0_resume_from':       None,
