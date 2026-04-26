@@ -169,3 +169,105 @@
   - Linear annealing over 300 epochs means slots are fully exploratory when their `prior_delta` is near zero (and needs strong gradient to move), then sharpening into specialists once they've found their semantic territory.
 
 - **Expected Behaviour**: Slot reconstruction loss should break through the ≈5 plateau by epoch ~100–150, with Slot Val Acc crossing 85%+ by epoch 300. The temperature trace in WandB (`P1_Slot/Temperature`) should show a clean linear decay from 1.0 to 0.1.
+
+---
+
+## 2️⃣4️⃣ Validation Audit: Codebook Drift & Slot-Object Misalignment – *What We Found*
+
+- **Experiment**: Ran `validate_phase1.py` after 1000 Phase 1 epochs.
+- **Result**:
+  ```
+  slot_mean_acc    : 81.2%   (baseline: 94.9%)
+  slot_beats_base  : 0       ← slot NEVER outperforms baseline
+  prior_delta_norms: 0.6–1.2 ← codebook moved ~100% of its original magnitude
+  ```
+- **Root Cause Diagnosed — Three Simultaneous Failures**:
+  1. **Codebook Drift**: `prior_delta_norms ~1.0` means the Phase 0 primitives were destroyed during Phase 1 optimization. The codebook weight gradients from Phase 1 completely overwrote Phase 0 structure.
+  2. **Patch-Level vs Object-Level Mismatch**: The Phase 0 codebook learned 5×5 patch textures ("solid blue patch"), not object descriptions ("3×3 blue square"). A slot attending to a whole object averages over multiple patch codes — it can never cleanly quantize to one patch code that describes the object.
+  3. **Slot → Decoder Disconnect**: After the GRU, the slot output is a raw continuous 320D vector. The codebook is never consulted again. The decoder has no reason to interpret its input in terms of codebook primitives — it learns an arbitrary continuous mapping, not a structured vocabulary.
+- **Key Insight**: `slot_beats_base = 0` is not a training failure — it is a **structural** failure. The slot model suffers an information bottleneck (36 patches → 16 slots → pixels) with no structured latent space to organize that bottleneck. The baseline transformer avoids the bottleneck entirely, so it wins every time.
+
+---
+
+## 2️⃣5️⃣ Semantic Codebook Partitioning – *Why?*
+
+- **Change**: Modified `FactorizedVectorQuantizer._quantize()` to enforce hard semantic partitioning via logit masking:
+  - Shape codes `0–15` (N_BG_CODES): **reserved for background** (all-zero patches)
+  - Shape codes `16–1023`: **reserved for foreground objects only**
+  - Background patches are masked to choose only from BG codes; foreground patches are masked from BG codes.
+- **Rationale**: Without partitioning, background (all-zero) patches dominate the argmin competition and colonize ~30% of foreground codes. This wastes capacity and makes the foreground codebook appear sparsely used, triggering unnecessary surgery on perfectly valid codes.
+- **Expected Behaviour**: 100% of foreground codes evolve from real object patches. Perplexity over foreground codes should saturate to near full capacity. Background entropy is independent and doesn't pollute the foreground signal.
+
+---
+
+## 2️⃣6️⃣ Object-Level Codebook Theory – *The Core Architectural Insight*
+
+- **Core Principle**: A codebook code represents exactly what training loss tells it to reconstruct. If the reconstruction loss is applied at patch level → codes = patch textures. If applied at object level → codes = object descriptions.
+- **The Full Three-Phase Vision**:
+  - **Phase 0**: Patch Alphabet — 1024 codes = "letters" (texture primitives)
+  - **Phase 1**: Object Dictionary — same codes evolve into "words" (whole-object descriptions) because the Phase 1 loss is applied at object reconstruction scale via slots
+  - **Phase 2** *(future)*: JEPA Reasoning — codes become tokens in a sequence-to-sequence predictor. Input grid → object token sequence → Transformer predictor → output token sequence → decoded grid
+- **Why Discrete Tokens Enable ARC Reasoning**:
+  - Continuous JEPA can collapse (predict the mean embedding). Discrete codes cannot — Cross-Entropy demands exactly the right code.
+  - ARC rules are compositional: "swap colors" = swap code dimensions. This is only expressible cleanly in a discrete vocabulary.
+  - The JEPA predictor becomes a sequence-to-sequence model over object tokens — equivalent to symbolic rule induction but learned end-to-end.
+- **How the Codebook Evolves from Patch to Object Level**:
+  - Phase 1 quantizes the **slot** (not the patch) → code `e_k` receives gradient from object-level reconstruction loss → `e_k` drifts toward centroid of all slot vectors that chose it → centroid = average description of a class of objects → object-level code.
+  - This is online k-means in slot space, supervised by object reconstruction loss.
+
+---
+
+## 2️⃣7️⃣ Six-Loss Object-Level Training Regime – *Why?*
+
+Redesigned the Phase 1 training loop with 6 targeted losses, each enforcing one necessary property of object-complete slots:
+
+| Loss | Function | What It Enforces |
+|---|---|---|
+| **L1** | Focal CrossEntropy (FG 50× weight) | Full pixel reconstruction; foreground object fidelity |
+| **L2** | `slot_sharpness_loss` — entropy of alpha per pixel | Each pixel must belong to ONE slot (not diffuse overlap) |
+| **L3** | `slot_coverage_loss` — CC coverage penalty | Slot must cover the FULL connected component, not just part |
+| **L4** | `vicreg_loss_slots` — VICReg across K slots | Slots within one image must be diverse; no collapse to mean |
+| **L5** | `slot_vq_commit_loss` — STE commitment | Slot shape stays near a valid codebook code; codebook pulls toward slot |
+| **L6** | `codebook_warmup_epochs=150` — gradient masking | Codebook frozen for first 150 epochs; slots learn to USE Phase 0 primitives before modifying them |
+
+- **Training Schedule**:
+  - Epochs 1–150: L1 + L4 + L6 (reconstruction + diversity, codebook frozen)
+  - Epochs 151–400: All losses, codebook unlocked at LR=1e-5 (object-level evolution begins)
+  - Epochs 401+: Full joint optimization
+- **Codebook Freeze Rationale**: `prior_delta_norms ~1.0` from Experiment 24 directly motivated this. Without freezing, Phase 1 gradients destroy Phase 0 structure within 50 epochs. The freeze guarantees slots learn routing logic first, then the codebook evolves jointly.
+
+---
+
+## 2️⃣8️⃣ Expandable Codebook Design – *Why?*
+
+- **Change**: Added `expand_codebook()` utility function that expands a frozen checkpoint from N to M codes without retraining.
+- **Rationale**: ARC-AGI has a theoretically unbounded set of object types across the full task distribution. A fixed-size codebook will eventually saturate. Instead of picking an arbitrarily large size upfront (wasting compute), the codebook starts at 1024 codes and can be expanded by:
+  1. Loading the frozen checkpoint
+  2. Appending M-N new codes, seeded as small perturbations of the most-used existing codes
+  3. Continuing training — new codes start near real data distribution and converge quickly
+- **Literature Ref**: VQ-VAE-2 (Razavi 2019) showed EMA-based codebook updates converge when seeded near data. Random initialization of new codes causes dead-code collapse; perturbation-seeding avoids this.
+- **Usage**:
+  ```python
+  from train_phase0 import expand_codebook
+  expand_codebook('runs/.../phase0/frozen_vq_codebook.pth', new_num_shape_codes=2048)
+  ```
+
+---
+
+### 📈 Updated Performance Table (Post Session – April 26, 2026)
+
+| Change | Anticipated Metric Improvement |
+|---|---|
+| T‑unroll (7) | +12 % on multi‑step ARC tasks |
+| Curriculum Gate | +8 % stability, ↓ variance |
+| AdaLN | +5 % reward prediction MSE |
+| AttnRes | Enables 64/128‑layer models |
+| VQ Bottleneck | Forces discrete object routing |
+| Phase 0 Pretraining | Stable alphabet before slot training |
+| **Semantic Partitioning** | Eliminates BG code colonization, full FG capacity |
+| **Codebook Freeze Warmup** | Prevents `prior_delta_norms` crisis; drift → < 0.1 |
+| **CC Affinity Loss** | Same object → same code; object coherence in codebook |
+| **6-Loss Slot Regime** | Object-complete slots; `slot_beats_base` > 0 expected |
+| **6-Loss coverage (L3)** | Eliminates partial-object slot truncation |
+| **Expandable Codebook** | ARC vocabulary can grow without full retraining |
+| **Phase 2 JEPA (future)** | Object-token sequence reasoning; crossentropy prediction |
