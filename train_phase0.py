@@ -781,7 +781,9 @@ def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset, s
             alphas_raw = slot_out.get('masks_raw', None)
 
             dec_out   = slot_dec({'latent': slots})
-            alphas    = dec_out['alphas']  # [B, K, H, W] — softmax'd
+            # Decoder returns alphas as [B, K, 1, H, W] — squeeze the extra dim
+            # so sharpness and coverage losses receive the expected [B, K, H, W]
+            alphas    = dec_out['alphas'].squeeze(2)  # [B, K, H, W]
 
             # L1: Focal-weighted pixel reconstruction
             recon_target = states[:, 0].long()
@@ -801,8 +803,9 @@ def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset, s
                 try:
                     l_cover = slot_coverage_loss(alphas, states, cfg['patch_size'])
                     ep_scover.append(l_cover.item())
-                except Exception:
-                    pass
+                except Exception as e:
+                    if step == 0:  # only log once per epoch to avoid spam
+                        print(f"  ⚠️  Coverage loss skipped: {e}")
 
             # L4: Slot diversity (VICReg across K slots within each image)
             l_div = vicreg_loss_slots(slots,
