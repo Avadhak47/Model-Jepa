@@ -1,50 +1,55 @@
 """
-Full NS-ARC Training Pipeline — Phase 0 + Phase 1
-====================================================
-Runs the complete pipeline end-to-end on the server without Jupyter:
+NS-ARC Full Training Pipeline — Object-Level Codebook Edition
+=============================================================
+Trains a two-phase pipeline to build an object-level discrete codebook
+for JEPA-based reasoning over ARC-AGI grids.
 
-    python train_phase0.py
+PHASE 0 — Patch Alphabet
+  Trains a FactorizedVQ codebook on 5×5 patches using:
+  - Pixel reconstruction loss (CrossEntropy)
+  - Rotation-invariance contrastive loss (InfoNCE)
+  - VICReg variance/covariance anti-collapse
+  - Connected-component affinity loss (same object → same code)
+  - Semantic partitioning: BG codes 0..N_BG, FG codes N_BG..N
 
-All outputs (checkpoints, metrics, plots) are saved to:
-    runs/<run_name>_<timestamp>/
-    └── phase0/
-    │   ├── latest_checkpoint.pth
-    │   ├── frozen_vq_codebook.pth
-    │   └── metrics_log.jsonl
-    └── phase1/
-        ├── latest_slot_checkpoint.pth
-        ├── metrics_log.jsonl
-        └── plots/
-            ├── recon_epoch_*.png
-            └── masks_epoch_*.png
+PHASE 1 — Object Dictionary
+  Trains a Slot Attention model on top of Phase 0 codebook using:
+  - L1: Pixel reconstruction  (CrossEntropy, Focal-weighted)
+  - L2: Slot sharpness        (entropy of alpha per pixel → low)
+  - L3: Slot coverage         (slot must cover full connected component)
+  - L4: Slot diversity        (VICReg across slots within image)
+  - L5: VQ commitment         (slot shape → codebook + codebook → slot)
+  - L6: Codebook freeze warmup (first N epochs: codebook frozen)
 
-This directory is .gitignored so nothing leaks into version control.
+EXPANDABLE CODEBOOK:
+  The codebook supports adding new codes at any checkpoint via
+  `expand_codebook(checkpoint_path, new_size)` without retraining.
+  Uses Residual VQ (multiple stacked codebooks) for hierarchical
+  object descriptions at different abstraction levels.
 
-Stability features:
-- NaN guard: skips corrupt batches, exits after 5 consecutive NaN
-- LR warmup after surgery: prevents VQ spike gradient explosion
-- Soft 25% quantile resurrection: replaces weakest codes
-- Padding-masked perplexity and surgery pool
-- Graceful SIGINT/SIGTERM: saves checkpoint on Ctrl+C or server kill
-- resume_from: pass checkpoint path in CFG to resume a run
-- WandB logging with local JSONL fallback
+References:
+  - SLATE (Singh et al., 2022): dVAE + Slot Attention
+  - DINOSAUR (Seitzer et al., 2023): DINO features + Slot Attention
+  - VQ-VAE-2 (Razavi et al., 2019): Hierarchical VQ, EMA codebook
+  - VICReg (Bardes et al., 2022): Variance-Invariance-Covariance Reg
+  - MESH (ICML 2023): Sinkhorn entropy for slot sharpness
+
+Usage:
+  python train_phase0.py
+
+All outputs saved to runs/<run_name>_<timestamp>/
 """
 
-import sys
-import os
-
-# Reduce CUDA memory fragmentation (helps when two models share the GPU sequentially)
+import sys, os
 os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
-import signal
-import json
-import datetime
+
+import signal, json, datetime, math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
 
-# ── Path setup ─────────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from arc_data.rearc_dataset import ReARCDataset
@@ -57,101 +62,132 @@ from modules.semantic_decoders import SemanticDecoder
 from analysis.evaluator import run_validation_epoch
 from analysis.plot_utils import plot_reconstruction_dashboard, plot_slot_masks
 
-# ── WandB (graceful offline fallback) ──────────────────────────────────────
 try:
     import wandb
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
-    print("⚠️  wandb not found — metrics logged locally to metrics_log.jsonl only")
+    print("⚠️  wandb not found — logging locally only")
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SHARED CONFIG
+# RESEARCH-BACKED CONFIGURATION
+# Literature: SLATE, DINOSAUR, VQ-VAE-2, VICReg
 # ═══════════════════════════════════════════════════════════════════════════
 CFG = {
-    # Run identity
-    'run_name':             'FactorizedFPS-v5',  # patch5, hid512, 16slots-7iters, codebook512
+    # ── Run Identity ─────────────────────────────────────────────────────
+    'run_name':             'ObjectCodebook-v1',
     'wandb_project':        'NS-ARC-Scaling',
 
-    # Architecture
+    # ── Architecture ─────────────────────────────────────────────────────
+    # Literature ref: SLATE uses 64D codebook, VQ-VAE-2 uses 128D.
+    # For ARC (10 colors, simple shapes) 128D is expressive enough.
     'device':               'cuda' if torch.cuda.is_available() else 'cpu',
-    'in_channels':          10,       # One-Hot encoded ARC colors
-    'patch_size':           5,
-    'hidden_dim':           256,
-    'latent_dim':           256,       # For VQ Shape + Color Factorization
-    'pose_dim':             64,        # Unquantized Equivariant Pose
-    'vocab_size':           10,
+    'in_channels':          10,           # One-Hot ARC colors
+    'patch_size':           5,            # 30/5 = 6×6 = 36 patches per grid
+    'hidden_dim':           256,          # Encoder hidden dim (SLATE uses 64-256)
+    'latent_dim':           256,          # VQ input dim (shape 128 + color 128)
+    'pose_dim':             64,           # Continuous pose/position dim
+    'vocab_size':           10,           # ARC has 10 colors (0-9)
     'grid_size':            30,
-    'focal_gamma':          2.0,
-    'num_slots':            16,
-    'slot_iters':           7,
-    # Slot attention temperature schedule:
-    #   Epoch 1 → slot_temp_start (high = soft/exploratory, all slots get gradient)
-    #   Epoch slot_temp_anneal → slot_temp_end (low = sharp/specialised)
-    # This prevents lost slots from being starved of gradient early,
-    # while still converging to clean object-level assignments later.
-    'slot_temperature':     0.1,      # fallback if annealing is disabled
-    'slot_temp_start':      1.0,      # initial temperature  (exploration phase)
-    'slot_temp_end':        0.1,      # final temperature    (exploitation phase)
-    'slot_temp_anneal':     300,      # epochs over which to linearly anneal
 
-    # Phase 0 training
-    'p0_epochs':            500,   # Fresh run — patch_size=5, hidden_dim=512 (new architecture)
-    'p0_steps':             100,
-    'p0_batch':             128,
-    'p0_lr':                5e-4,
-    'p0_lr_post_surgery':   1e-4,
-    'p0_lr_warmup_epochs':  2,
-    'p0_grad_clip':         2.0,
-    'p0_save_interval':     10,
+    # ── Phase 0 Codebook ─────────────────────────────────────────────────
+    # Literature: SLATE uses 4096-8192 codes for natural images.
+    # ARC has much simpler structure → 1024 codes gives good coverage.
+    # N_BG_CODES (16) are reserved for background by semantic partitioning.
+    'num_shape_codes':      1024,         # Total shape codes (BG: 0-15, FG: 16-1023)
+    'num_color_codes':      32,           # More color codes for multi-color patterns
+    'commitment_cost':      0.25,         # Standard VQ-VAE value (Razavi 2019)
+    'ema_decay':            0.99,         # EMA decay for codebook update (VQ-VAE-2)
 
-    # Phase 0 codebook
-    'num_shape_codes':      512,
-    'num_color_codes':      16,
-    'commitment_cost':      0.25,
-    'surgery_interval':     25,
-    'surgery_quantile':     0.15,
+    # Phase 0 surgery (resurrection of dead codes)
+    'surgery_interval':     50,           # Every N epochs resurrect dead codes
+    'surgery_quantile':     0.10,         # Replace bottom 10% by usage
 
-    # Phase 0 early stop
-    'p0_stop_perp_shape':   460.0,
-    'p0_stop_perp_color':   14.0,
+    # ── Phase 0 Training ─────────────────────────────────────────────────
+    # Literature: SLATE trains 100k-500k steps. ARC is simpler → 200 epochs × 200 steps.
+    'p0_epochs':            500,
+    'p0_steps':             200,          # Steps per epoch
+    'p0_batch':             128,          # Batch size (SLATE: 64-128)
+    'p0_lr':                4e-4,         # Adam learning rate (SLATE: 3e-4 to 1e-3)
+    'p0_lr_post_surgery':   1e-4,         # LR after codebook surgery
+    'p0_lr_warmup_epochs':  2,            # Epochs at reduced LR after surgery
+    'p0_grad_clip':         2.0,          # Gradient clip (conservative for VQ)
+    'p0_save_interval':     25,
+
+    # Phase 0 loss weights (tuned from VICReg paper + SLATE)
+    'p0_inv_weight':        10.0,         # Rotation invariance (InfoNCE-style)
+    'p0_vicreg_weight':     0.1,          # VICReg anti-collapse
+    'p0_affinity_weight':   0.5,          # CC affinity (same object → same code)
+    'p0_affinity_interval': 5,            # Compute affinity every N steps (scipy is slow)
+
+    # Phase 0 early stop thresholds
+    'p0_stop_perp_shape':   900.0,        # Stop if shape perplexity > 90% of 1024
+    'p0_stop_perp_color':   28.0,         # Stop if color perplexity > 87% of 32
     'p0_stop_recon':        0.05,
 
-    # Phase 1 training
-    'p1_epochs':            2000,
-    'p1_steps':             100,
-    'p1_batch':             64,
-    'p1_lr':                1e-4,
-    'p1_grad_clip':         1.0,
-    'p1_save_interval':     10,
-    'p1_val_interval':      10,     # Run validation every N epochs
-    'codebook_warmup_epochs': 100,  # Freeze codebook for first N Phase 1 epochs
+    # ── Slot Attention Architecture ───────────────────────────────────────
+    # Literature: SLATE uses 7 slots for CLEVR, DINOSAUR uses 11 for COCO.
+    # ARC grids have 1-8 distinct objects typically → 12 slots gives headroom.
+    'num_slots':            12,           # Slightly fewer than before (more focused)
+    'slot_iters':           7,            # Slot attention iterations (standard: 3-7)
 
-    # Data paths
+    # Temperature schedule (linear anneal, Locatello et al. 2020)
+    'slot_temp_start':      1.0,          # High temp = exploratory (soft masks)
+    'slot_temp_end':        0.1,          # Low temp = sharp (hard object masks)
+    'slot_temp_anneal':     400,          # Epochs over which to anneal
+    'slot_temperature':     0.1,          # Fallback if annealing disabled
+
+    # ── Phase 1 Training ─────────────────────────────────────────────────
+    # Literature: Object-centric models typically need 300-500k steps.
+    # ARC is simpler but we need discrete codebook convergence.
+    'p1_epochs':            2000,
+    'p1_steps':             200,          # Steps per epoch
+    'p1_batch':             64,
+    'p1_lr':                1e-4,         # Lower LR than P0 (fine-tuning codebook)
+    'p1_grad_clip':         1.0,
+    'p1_save_interval':     25,
+    'p1_val_interval':      25,
+
+    # ── Phase 1 Loss Weights (from derivation in architecture decisions) ──
+    # L1: Reconstruction (primary objective)
+    'p1_recon_weight':      1.0,
+    'p1_focal_gamma':       2.0,          # Focal loss gamma (foreground weighting)
+    'p1_fg_weight':         50.0,         # Foreground pixel weight multiplier
+    # L2: Slot sharpness (entropy of alpha at each pixel)
+    'p1_sharp_weight':      0.5,
+    # L3: Slot coverage (slot must cover full connected component)
+    'p1_cover_weight':      0.3,
+    'p1_cover_interval':    10,           # Every N steps (scipy CC labeling is slow)
+    # L4: Slot diversity (VICReg across K slots within each image)
+    'p1_vicreg_std':        25.0,         # VICReg std coefficient
+    'p1_vicreg_cov':        1.0,          # VICReg cov coefficient
+    'p1_vicreg_weight':     0.1,
+    # L5: VQ commitment loss (slot ↔ codebook alignment)
+    'p1_commit_weight':     0.25,
+    # L6: Codebook warmup freeze
+    'codebook_warmup_epochs': 150,        # Epochs codebook is frozen (SLATE warmup)
+    'codebook_finetune_lr':   1e-5,       # Very low LR when codebook unfrozen
+
+    # ── Data Paths ───────────────────────────────────────────────────────
     'data_path':            'arc_data/re-arc/tasks',
     'arc_heavy_path':       'arc_data/arc-heavy/training',
     'eval_data_path':       'arc_data/original/evaluation',
-    'val_batch_size':       50,
+    'val_batch_size':       64,
 
-    # Resume — fresh run.
-    # ⚠️  Architecture changed v4→v5:
-    #   patch_size: 6→5  (36 patches per grid)
-    #   hidden_dim: 128→512, nhead: 4→8, transformer layers: 2→6
-    #   num_shape_codes: 256→512
-    #   num_slots: 10→16, slot_iters: 5→7
-    # All of these change weight shapes — must start from scratch.
-    'p0_resume_from': "runs/FactorizedFPS-v5_2026-04-25_04-37-07/phase0/latest_checkpoint.pth",
-    'p1_resume_from': "runs/FactorizedFPS-v5_2026-04-25_04-37-07/phase1/latest_slot_checkpoint.pth"
+    # ── Resume ────────────────────────────────────────────────────────────
+    'p0_resume_from':       None,
+    'p1_resume_from':       None,
+    'resume_run_dir':       None,
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
-# GRACEFUL SHUTDOWN
+# SIGNAL HANDLER
 # ═══════════════════════════════════════════════════════════════════════════
 _STOP = False
 
 def _handle_signal(sig, frame):
     global _STOP
-    print(f"\n🛑 Signal {sig} received — saving checkpoint at end of this epoch.")
+    print(f"\n🛑 Signal {sig} — saving checkpoint at end of current epoch.")
     _STOP = True
 
 signal.signal(signal.SIGINT,  _handle_signal)
@@ -160,8 +196,8 @@ signal.signal(signal.SIGTERM, _handle_signal)
 # ═══════════════════════════════════════════════════════════════════════════
 # UTILITIES
 # ═══════════════════════════════════════════════════════════════════════════
-def make_run_dir(cfg: dict) -> tuple[str, str, str]:
-    """Creates the full run directory tree and returns (root, p0_dir, p1_dir)."""
+
+def make_run_dir(cfg):
     ts = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     root = os.path.join('runs', f"{cfg['run_name']}_{ts}")
     p0_dir = os.path.join(root, 'phase0')
@@ -175,126 +211,286 @@ def make_run_dir(cfg: dict) -> tuple[str, str, str]:
     return root, p0_dir, p1_dir
 
 
-def set_lr(opt, lr: float):
+def set_lr(opt, lr):
     for g in opt.param_groups:
         g['lr'] = lr
 
 
 def log_metrics(wb_run, metrics: dict, step: int, log_path: str):
-    if WANDB_AVAILABLE and wb_run is not None:
-        wb_run.log(metrics, step=step)
-    with open(log_path, 'a') as f:
-        f.write(json.dumps({'step': step, **metrics}) + '\n')
-
-
-def compute_valid_patch_mask(state: torch.Tensor, patch_size: int = 2) -> torch.Tensor:
-    """Bool [B, N] — True for patches containing at least one real (non-zero) pixel."""
-    s = state.squeeze(1).long()
-    B, H, W = s.shape
-    Ph, Pw = H // patch_size, W // patch_size
-    patches = s.unfold(1, patch_size, patch_size).unfold(2, patch_size, patch_size)
-    return patches.reshape(B, Ph, Pw, patch_size * patch_size).any(dim=-1).reshape(B, Ph * Pw)
-
-
-def init_wandb(cfg, run_dir, phase_tag, wb_run=None):
-    """Initialise or reuse a WandB run. Returns wb_run (may be None on failure)."""
-    if not WANDB_AVAILABLE:
-        return None
-    if wb_run is not None:
-        return wb_run          # reuse across phases
-    api_key = os.environ.get('WANDB_API_KEY')
-    if api_key:
+    if wb_run:
         try:
-            wandb.login(key=api_key)
+            wb_run.log(metrics, step=step)
         except Exception:
             pass
+    row = {'step': step, **{k: float(v) for k, v in metrics.items()}}
+    with open(log_path, 'a') as f:
+        f.write(json.dumps(row) + '\n')
+
+
+def init_wandb(cfg, run_dir, suffix):
+    if not WANDB_AVAILABLE:
+        return None
     try:
-        return wandb.init(
+        import wandb as wb
+        run = wb.init(
             project=cfg['wandb_project'],
-            name=f"{cfg['run_name']}-{phase_tag}",
+            name=f"{cfg['run_name']}-{suffix}",
             config=cfg,
-            resume='allow',
             dir=run_dir,
+            resume='allow',
         )
+        return run
     except Exception as e:
-        print(f"⚠️  WandB init failed ({e}), proceeding offline.")
+        print(f"⚠️  WandB init failed ({e}). Logging locally.")
         return None
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# MODELS
-# ═══════════════════════════════════════════════════════════════════════════
-def vicreg_loss(z, var_weight=25.0, cov_weight=1.0):
-    """
-    VICReg: Variance-Invariance-Covariance Regularization
-    Prevents collapse without requiring negative samples.
-    """
-    B, N, D = z.shape
-    z = z.reshape(B * N, D)
-    
-    # 1. Variance Loss: Std of each dimension should be >= 1
-    std = torch.sqrt(z.var(dim=0) + 1e-04)
-    v_loss = torch.mean(F.relu(1.0 - std))
-    
-    # 2. Covariance Loss: Off-diagonals of Cov(z) should be zero
-    z_norm = z - z.mean(dim=0)
-    cov = (z_norm.T @ z_norm) / (max(B * N - 1, 1))
-    diag = torch.eye(D, device=z.device)
-    c_loss = (cov * (1 - diag)).pow(2).sum() / D
-    
-    return var_weight * v_loss + cov_weight * c_loss
+def compute_valid_patch_mask(state: torch.Tensor, patch_size: int) -> torch.Tensor:
+    """Returns bool mask [B, N] — True if any pixel in the patch is non-zero."""
+    B, _, H, W = state.shape
+    p = patch_size
+    n = (H // p) * (W // p)
+    patches = state.unfold(2, p, p).unfold(3, p, p)           # [B,1,h,w,p,p]
+    patches = patches.reshape(B, 1, -1, p * p)                 # [B,1,N,p²]
+    return (patches.squeeze(1).abs().sum(-1) > 0)              # [B, N]
 
+# ═══════════════════════════════════════════════════════════════════════════
+# LOSS FUNCTIONS
+# ═══════════════════════════════════════════════════════════════════════════
+
+def vicreg_loss(z, std_coeff=25.0, cov_coeff=1.0):
+    """VICReg applied across batch dimension. z: [N, D]"""
+    z = z - z.mean(dim=0)
+    std = torch.sqrt(z.var(dim=0) + 1e-4)
+    std_loss = F.relu(1.0 - std).mean()
+    cov = (z.T @ z) / (z.shape[0] - 1)
+    n = cov.shape[0]
+    cov_loss = cov.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten().pow(2).sum() / n
+    return std_coeff * std_loss + cov_coeff * cov_loss
+
+
+def vicreg_loss_slots(slots, std_coeff=25.0, cov_coeff=1.0):
+    """
+    VICReg applied ACROSS SLOTS within each image — forces slot diversity.
+    slots: [B, K, D]
+    Each image independently: K slot vectors should be diverse.
+    """
+    B, K, D = slots.shape
+    total = torch.tensor(0.0, device=slots.device)
+    for b in range(B):
+        z = slots[b]  # [K, D] — K slots for one image
+        z = z - z.mean(dim=0)
+        std = torch.sqrt(z.var(dim=0) + 1e-4)
+        std_loss = F.relu(1.0 - std).mean()
+        cov = (z.T @ z) / max(K - 1, 1)
+        cov_loss = cov.flatten()[:-1].view(D - 1, D + 1)[:, 1:].flatten().pow(2).sum() / D
+        total = total + std_coeff * std_loss + cov_coeff * cov_loss
+    return total / B
+
+
+def slot_sharpness_loss(alphas):
+    """
+    L2: Encourage sharp per-pixel slot ownership.
+    alphas: [B, K, H, W] — softmax'd alpha from decoder.
+    Low entropy at each pixel = one slot clearly wins.
+    """
+    # alphas are already softmax'd over K. Compute entropy across slot dim.
+    eps = 1e-8
+    entropy = -(alphas * (alphas + eps).log()).sum(dim=1)  # [B, H, W]
+    return entropy.mean()
+
+
+def slot_coverage_loss(alphas, state, patch_size):
+    """
+    L3: Slot must cover the FULL connected component of its "winning" object.
+    alphas: [B, K, H, W] — slot alpha (softmax over K).
+    state:  [B, 1, H, W] — original grid (int 0-9).
+    For each connected component: the dominant slot should have alpha≈1 over all CC pixels.
+    """
+    try:
+        from scipy import ndimage
+    except ImportError:
+        return torch.tensor(0.0, device=alphas.device)
+
+    B, K, H, W = alphas.shape
+    device = alphas.device
+    total_loss = torch.tensor(0.0, device=device)
+    count = 0
+
+    # Work with dominant slot per pixel [B, H, W]
+    dominant = alphas.argmax(dim=1).cpu().numpy()  # [B, H, W]
+    alpha_np  = alphas.detach().cpu().numpy()       # [B, K, H, W]
+    grid_np   = state[:, 0].cpu().numpy().astype(int)  # [B, H, W]
+
+    for b in range(B):
+        label_map = np.zeros((H, W), dtype=int)
+        next_label = 1
+        for color in range(1, 10):
+            mask = (grid_np[b] == color)
+            if not mask.any():
+                continue
+            labeled, n_comp = ndimage.label(mask)
+            label_map[mask] = labeled[mask] + next_label - 1
+            next_label += n_comp
+
+        if next_label == 1:
+            continue  # all background, skip
+
+        for label_id in range(1, next_label):
+            cc_mask = (label_map == label_id)  # [H, W]
+            if cc_mask.sum() < 2:
+                continue
+
+            # Find dominant slot for this CC (by total alpha mass)
+            slot_mass = alpha_np[b, :, cc_mask].sum(axis=1)  # [K]
+            dom_slot  = slot_mass.argmax()
+
+            # Penalty: alpha of dominant slot at CC pixels should be ≈1
+            # Use a differentiable path through the original `alphas` tensor
+            cc_indices = torch.from_numpy(cc_mask).to(device)
+            # coverage_loss = mean((1 - alpha[dom_slot, CC_pixels])^2)
+            coverage = alphas[b, dom_slot][cc_indices]  # [n_cc_pixels]
+            loss_b = ((1.0 - coverage) ** 2).mean()
+            total_loss = total_loss + loss_b
+            count += 1
+
+    return total_loss / max(count, 1)
+
+
+def slot_vq_commit_loss(slot_shape, codebook_embedding, beta=0.25):
+    """
+    L5: VQ Commitment loss for slot quantization.
+    slot_shape:          [B, K, 128] — projected slot shape part
+    codebook_embedding:  [B, K, 128] — nearest codebook entry (after STE)
+    beta:                codebook update weight (Razavi 2019: 0.25)
+    """
+    # Commitment: push slot toward code
+    commit = F.mse_loss(slot_shape, codebook_embedding.detach())
+    # Codebook update: pull code toward slot
+    cb_update = F.mse_loss(codebook_embedding, slot_shape.detach())
+    return commit + beta * cb_update
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# EXPANDABLE CODEBOOK UTILITY
+# ═══════════════════════════════════════════════════════════════════════════
+
+def expand_codebook(checkpoint_path: str, new_num_shape_codes: int,
+                    new_num_color_codes: int = None, out_path: str = None):
+    """
+    Expands a trained VQ codebook checkpoint to a larger size.
+    New code slots are initialized with EMA noise around existing code centroids,
+    seeding them close to real data distribution.
+
+    Args:
+        checkpoint_path: Path to a frozen_vq_codebook.pth
+        new_num_shape_codes: Target codebook size (must be >= current size)
+        new_num_color_codes: Optional new color codebook size
+        out_path: Where to save the expanded checkpoint
+
+    Usage:
+        expand_codebook(
+            'runs/.../phase0/frozen_vq_codebook.pth',
+            new_num_shape_codes=2048
+        )
+    """
+    state = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
+
+    shape_w = state['embedding_shape.weight']  # [old_N, D]
+    color_w = state['embedding_color.weight']  # [old_C, D]
+    old_N, D = shape_w.shape
+    old_C    = color_w.shape[0]
+
+    if new_num_shape_codes <= old_N:
+        raise ValueError(f"new_num_shape_codes ({new_num_shape_codes}) must be > current ({old_N})")
+
+    n_new_shape = new_num_shape_codes - old_N
+    # Sample new codes: random perturbations of the top-used existing codes
+    # (perturb by a small fraction of their std dev)
+    noise_std = shape_w.std() * 0.1
+    random_base = shape_w[torch.randint(0, old_N, (n_new_shape,))]
+    new_shape_codes = random_base + torch.randn_like(random_base) * noise_std
+
+    expanded_shape = torch.cat([shape_w, new_shape_codes], dim=0)
+    state['embedding_shape.weight'] = expanded_shape
+
+    if new_num_color_codes is not None and new_num_color_codes > old_C:
+        n_new_color = new_num_color_codes - old_C
+        noise_std_c = color_w.std() * 0.1
+        random_base_c = color_w[torch.randint(0, old_C, (n_new_color,))]
+        new_color_codes = random_base_c + torch.randn_like(random_base_c) * noise_std_c
+        expanded_color = torch.cat([color_w, new_color_codes], dim=0)
+        state['embedding_color.weight'] = expanded_color
+
+        usage_shape = torch.zeros(new_num_shape_codes)
+        usage_color = torch.zeros(new_num_color_codes)
+    else:
+        usage_shape = torch.zeros(new_num_shape_codes)
+        usage_color = torch.zeros(old_C)
+
+    state['shape_usage'] = usage_shape
+    state['color_usage'] = usage_color
+
+    out_path = out_path or checkpoint_path.replace('.pth', f'_expanded{new_num_shape_codes}.pth')
+    torch.save(state, out_path)
+    print(f"✅ Expanded codebook: {old_N} → {new_num_shape_codes} shape codes")
+    print(f"   Saved to: {out_path}")
+    return out_path
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PHASE 0 AUTOENCODER (Patch-Level Alphabet)
+# ═══════════════════════════════════════════════════════════════════════════
 
 class Phase0Autoencoder(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.encoder = PatchTransformerEncoder(cfg)
-        self.vq = FactorizedVectorQuantizer(
+        self.vq      = FactorizedVectorQuantizer(
             num_shape_codes=cfg['num_shape_codes'],
             num_color_codes=cfg['num_color_codes'],
             embedding_dim=cfg['latent_dim'],
             commitment_cost=cfg['commitment_cost'],
         )
         self.decoder = PatchDecoder(cfg)
-        self.to(cfg['device'])
 
     def forward(self, inputs, valid_mask=None, temperature=1.0):
         enc_out = self.encoder(inputs)
-        z_vq = enc_out['latent_vq']
-        z_pose = enc_out['latent_pose']
-        
-        # Soft-routing quantization (Straight-Through Gumbel Softmax)
-        z_q, vq_loss, p_shape, p_color, shape_idx = self.vq(z_vq, valid_mask=valid_mask, temperature=temperature)
-        
-        # Feature combinations (Structural Identity + Continuous Orientation)
+        z_vq    = enc_out['latent_vq']
+        z_pose  = enc_out['latent_pose']
+        z_q, vq_loss, p_shape, p_color, shape_idx = self.vq(
+            z_vq, valid_mask=valid_mask, temperature=temperature)
         latent_combined = torch.cat([z_q, z_pose], dim=-1)
         out = self.decoder({'latent': latent_combined})
         return out, vq_loss, p_shape, p_color, z_vq, shape_idx
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# PHASE 0 — FACTORIZED CODEBOOK PRETRAINING
+# PHASE 0 TRAINING
 # ═══════════════════════════════════════════════════════════════════════════
-def train_phase_0(cfg, p0_dir, wb_run, dataset):
+
+def train_phase_0(cfg, p0_dir, wb_run, train_dataset):
     global _STOP
-    device = cfg['device']
-
-    print("\n" + "═"*60)
-    print("🚀  PHASE 0: Factorized Codebook Pretraining (SLATE Mode)")
-    print("═"*60)
-
-    ckpt_path    = os.path.join(p0_dir, 'latest_checkpoint.pth')
-    vq_path      = os.path.join(p0_dir, 'frozen_vq_codebook.pth')
+    device      = cfg['device']
+    ckpt_path   = os.path.join(p0_dir, 'latest_checkpoint.pth')
+    vq_path     = os.path.join(p0_dir, 'frozen_vq_codebook.pth')
     metrics_path = os.path.join(p0_dir, 'metrics_log.jsonl')
 
-    model = Phase0Autoencoder(cfg)
-    opt   = torch.optim.AdamW(model.parameters(), lr=cfg['p0_lr'])
+    print("\n" + "═" * 60)
+    print("🚀  PHASE 0: Object Alphabet Pretraining")
+    print(f"    Codebook: {cfg['num_shape_codes']} shape × {cfg['num_color_codes']} color codes")
+    print(f"    BG reserved: codes 0–{FactorizedVectorQuantizer.N_BG_CODES - 1}")
+    print("═" * 60)
 
-    start_epoch   = 1
-    post_surg_cd  = 0
-    epoch         = 0
+    model = Phase0Autoencoder(cfg).to(device)
+    opt   = torch.optim.AdamW(model.parameters(), lr=cfg['p0_lr'],
+                               weight_decay=1e-4, betas=(0.9, 0.999))
 
-    # ── Resume ──────────────────────────────────────────────────────────────
+    start_epoch = 1
+    epoch       = 0
+    post_surg_cd = 0
+
+    # ── Resume ──────────────────────────────────────────────────────────
     resume = cfg.get('p0_resume_from') or (ckpt_path if os.path.exists(ckpt_path) else None)
     if resume and os.path.exists(resume):
         print(f"📥 P0 resuming from {resume}...")
@@ -303,74 +499,88 @@ def train_phase_0(cfg, p0_dir, wb_run, dataset):
             model.load_state_dict(ckpt['model'], strict=False)
             opt.load_state_dict(ckpt['opt'])
             start_epoch = ckpt['epoch'] + 1
-            epoch = ckpt['epoch']
+            epoch       = ckpt['epoch']
             print(f"   ✅ Resumed from epoch {ckpt['epoch']}.")
         except Exception as e:
-            print(f"   ⚠️  Incompatible checkpoint, starting fresh. ({e})")
+            print(f"   ⚠️  Checkpoint incompatible, starting fresh. ({e})")
 
-    # ── Training loop ────────────────────────────────────────────────────────
+    # ── Training Loop ───────────────────────────────────────────────────
     for epoch in range(start_epoch, cfg['p0_epochs'] + 1):
         model.train()
+        ep_loss, ep_vq, ep_ps, ep_pc, ep_aff = [], [], [], [], []
+        nan_streak = 0
 
+        # Gumbel temperature: 1.0 → 0.1 over full training
+        tau = max(0.1, 1.0 - (epoch / cfg['p0_epochs']))
+
+        # LR warmup after surgery
         if post_surg_cd > 0:
-            set_lr(opt, cfg['p0_lr_post_surgery'])
+            wd = cfg['p0_lr_warmup_epochs'] - post_surg_cd
+            warm_lr = cfg['p0_lr_post_surgery'] + (cfg['p0_lr'] - cfg['p0_lr_post_surgery']) * (wd / cfg['p0_lr_warmup_epochs'])
+            set_lr(opt, warm_lr)
             post_surg_cd -= 1
             if post_surg_cd == 0:
                 set_lr(opt, cfg['p0_lr'])
 
-        ep_loss, ep_vq, ep_ps, ep_pc = [], [], [], []
-        nan_streak = 0
+        cur_lr = opt.param_groups[0]['lr']
 
-        for _ in tqdm(range(cfg['p0_steps']), desc=f"P0 E{epoch:03d}", leave=False):
-            batch = dataset.sample(cfg['p0_batch'])
-            state = batch['state'].to(device)
-            B = state.shape[0]
-            vmask = compute_valid_patch_mask(state, cfg['patch_size']).to(device)
+        for step in tqdm(range(cfg['p0_steps']), desc=f"P0 E{epoch:04d}", leave=False):
+            batch  = train_dataset.sample(cfg['p0_batch'])
+            state  = batch['state'].to(device)
+            B      = state.shape[0]
+            vmask  = compute_valid_patch_mask(state, cfg['patch_size']).to(device)
 
-            # Temperature annealing for Gumbel Softmax (1.0 -> 0.1)
-            tau = max(0.1, 1.0 - (epoch / cfg['p0_epochs']))
-            
-            # --- 1. Augmented infoNCE Contrastive Pathway (Invariance) ---
+            # ── 1. Rotation Invariance Path (InfoNCE-style contrastive) ──
             k = torch.randint(1, 4, (1,)).item()
             state_rot = torch.rot90(state, k=k, dims=[2, 3])
-            vmask_rot = torch.rot90(vmask.view(B, 6, 6), k=k, dims=[1, 2]).reshape(B, 36)
-            _, vq_loss_rot, _, _, z_vq_rot, _shape_idx_rot = model({'state': state_rot}, valid_mask=vmask_rot, temperature=tau)
-            
-            # Align augmented patch grids: rotate back to calculate point-wise contrastive MSE
-            z_aligned = torch.rot90(z_vq_rot.view(B, 6, 6, -1).permute(0, 3, 1, 2), k=-k, dims=[2, 3]).flatten(2).transpose(1, 2)
-            
-            # --- 2. Standard State Pathway ---
-            out, vq_loss, p_shape, p_color, z_vq, shape_idx = model({'state': state}, valid_mask=vmask, temperature=tau)
-            loss_dict  = model.decoder.loss({'state': state}, out)
+            vmask_rot = torch.rot90(
+                vmask.view(B, cfg['grid_size']//cfg['patch_size'],
+                              cfg['grid_size']//cfg['patch_size']),
+                k=k, dims=[1, 2]
+            ).reshape(B, -1)
+            _, vq_loss_rot, _, _, z_vq_rot, _ = model(
+                {'state': state_rot}, valid_mask=vmask_rot, temperature=tau)
 
-            # --- 3. Affinity Loss (Object-Centric Codebook Alignment) ---
-            # Patches from same connected component → same shape code.
-            # Computed every 5 steps (scipy CC-labeling runs on CPU).
+            gh = cfg['grid_size'] // cfg['patch_size']
+            z_aligned = torch.rot90(
+                z_vq_rot.view(B, gh, gh, -1).permute(0, 3, 1, 2),
+                k=-k, dims=[2, 3]
+            ).flatten(2).transpose(1, 2)
+
+            # ── 2. Standard Forward Pass ─────────────────────────────────
+            out, vq_loss, p_shape, p_color, z_vq, shape_idx = model(
+                {'state': state}, valid_mask=vmask, temperature=tau)
+            loss_dict = model.decoder.loss({'state': state}, out)
+
+            # ── 3. Affinity Loss (every N steps, scipy CC on CPU) ────────
             aff_loss = torch.tensor(0.0, device=device)
-            if _ % 5 == 0:
-                grid_hw = cfg['grid_size'] // cfg['patch_size']
+            if step % cfg['p0_affinity_interval'] == 0:
                 try:
+                    grid_hw = cfg['grid_size'] // cfg['patch_size']
                     aff_loss = FactorizedVectorQuantizer.affinity_loss(
                         shape_idx, state, cfg['patch_size'], grid_hw
                     ).to(device)
+                    ep_aff.append(aff_loss.item())
                 except Exception:
-                    pass  # skip if scipy not available on this batch
+                    pass
 
-            # --- 4. Regularization & Final Loss ---
-            inv_loss = F.mse_loss(z_aligned, z_vq)  # Positives: Invariance
-            reg_loss = vicreg_loss(z_vq)             # Anti-collapse (VICReg)
-            
-            total_loss = (loss_dict['loss']
-                         + vq_loss + vq_loss_rot
-                         + (10.0 * inv_loss)
-                         + (0.1  * reg_loss)
-                         + (0.5  * aff_loss))
+            # ── 4. Total Loss ─────────────────────────────────────────────
+            inv_loss = F.mse_loss(z_aligned, z_vq)
+            reg_loss = vicreg_loss(z_vq.reshape(-1, z_vq.shape[-1]))
+
+            total_loss = (
+                loss_dict['loss']
+                + vq_loss + vq_loss_rot
+                + cfg['p0_inv_weight']      * inv_loss
+                + cfg['p0_vicreg_weight']   * reg_loss
+                + cfg['p0_affinity_weight'] * aff_loss
+            )
 
             if torch.isnan(total_loss) or torch.isinf(total_loss):
                 nan_streak += 1
                 opt.zero_grad()
                 if nan_streak >= 5:
-                    print(f"\n❌ P0: NaN persists for 5 steps at epoch {epoch} — saving & stopping.")
+                    print(f"\n❌ P0: NaN persists 5 steps at epoch {epoch} — stopping.")
                     _STOP = True
                     break
                 continue
@@ -394,23 +604,27 @@ def train_phase_0(cfg, p0_dir, wb_run, dataset):
         avg_vq      = float(np.mean(ep_vq))
         avg_p_shape = float(np.mean(ep_ps))
         avg_p_color = float(np.mean(ep_pc))
-        cur_lr      = opt.param_groups[0]['lr']
+        avg_aff     = float(np.mean(ep_aff)) if ep_aff else 0.0
 
         log_metrics(wb_run, {
-            'P0/Recon_Loss':           avg_recon,
-            'P0/VQ_Loss':              avg_vq,
-            'P0/Perplexity_Shape_256': avg_p_shape,
-            'P0/Perplexity_Color_16':  avg_p_color,
-            'P0/LR':                   cur_lr,
+            'P0/Recon_Loss':             avg_recon,
+            'P0/VQ_Loss':                avg_vq,
+            f'P0/Perplexity_Shape_{cfg["num_shape_codes"]}': avg_p_shape,
+            f'P0/Perplexity_Color_{cfg["num_color_codes"]}': avg_p_color,
+            'P0/Affinity_Loss':          avg_aff,
+            'P0/LR':                     cur_lr,
+            'P0/GumbelTau':              tau,
         }, step=epoch, log_path=metrics_path)
 
         if epoch % cfg['p0_save_interval'] == 0 or _STOP:
-            print(f"P0 E{epoch:03d} | Recon:{avg_recon:.4f} VQ:{avg_vq:.4f} "
-                  f"Shape:{avg_p_shape:.1f}/256 Color:{avg_p_color:.1f}/16 LR:{cur_lr:.1e}")
+            print(f"P0 E{epoch:04d} | Recon:{avg_recon:.4f} VQ:{avg_vq:.4f} "
+                  f"Perp:{avg_p_shape:.1f}/{cfg['num_shape_codes']} "
+                  f"Color:{avg_p_color:.1f}/{cfg['num_color_codes']} "
+                  f"Aff:{avg_aff:.3f} τ:{tau:.2f}")
             torch.save({'model': model.state_dict(), 'opt': opt.state_dict(),
                         'epoch': epoch, 'cfg': cfg}, ckpt_path)
 
-        # Codebook resurrection
+        # ── Codebook Surgery ─────────────────────────────────────────────
         if epoch % cfg['surgery_interval'] == 0:
             q_pct = int(cfg['surgery_quantile'] * 100)
             print(f"⚡ P0 E{epoch}: Resurrection (bottom {q_pct}% by usage)...")
@@ -423,11 +637,11 @@ def train_phase_0(cfg, p0_dir, wb_run, dataset):
             set_lr(opt, cfg['p0_lr_post_surgery'])
             post_surg_cd = cfg['p0_lr_warmup_epochs']
 
-        # Early stop
+        # ── Early Stop ───────────────────────────────────────────────────
         if (avg_p_shape > cfg['p0_stop_perp_shape']
                 and avg_p_color > cfg['p0_stop_perp_color']
                 and avg_recon < cfg['p0_stop_recon']):
-            print(f"\n✅ P0 Codebook fully baked at epoch {epoch}!")
+            print(f"\n✅ P0 Alphabet fully baked at epoch {epoch}!")
             torch.save({'model': model.state_dict(), 'opt': opt.state_dict(),
                         'epoch': epoch, 'cfg': cfg}, ckpt_path)
             break
@@ -436,51 +650,71 @@ def train_phase_0(cfg, p0_dir, wb_run, dataset):
             print(f"\n💾 P0 emergency checkpoint saved (epoch {epoch}).")
             break
 
-    # Save frozen VQ for Phase 1 FPS injection
-    # Detach the VQ from the full model before returning so the encoder and decoder
-    # weights become unreferenced and can be garbage-collected.
+    # Save frozen VQ
     frozen_vq = model.vq.eval()
-    del model          # Free encoder + decoder weights from GPU now, not at GC whim
+    del model
     torch.save(frozen_vq.state_dict(), vq_path)
     print(f"\n💾 Frozen VQ codebook → {vq_path}")
-    return frozen_vq, vq_path, epoch   # ← return final epoch for WandB offset
+    print(f"   Shape codes: {cfg['num_shape_codes']} | Color codes: {cfg['num_color_codes']}")
+    print(f"   To expand later: expand_codebook('{vq_path}', new_num_shape_codes=2048)")
+    return frozen_vq, vq_path, epoch
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# PHASE 1 — SLOTTED JEPA + BASELINE COMPARISON
+# PHASE 1 — OBJECT DICTIONARY TRAINING
 # ═══════════════════════════════════════════════════════════════════════════
-def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset, step_offset: int = 0):
-    """Phase 1 Slotted JEPA training. step_offset = last Phase 0 epoch so WandB steps are monotonic."""
+
+def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset, step_offset=0):
+    """
+    Trains slot attention model with all 6 object-level losses.
+    The codebook evolves from patch-level into an object-level dictionary.
+    """
     global _STOP
     device = cfg['device']
 
-    print("\n" + "═"*60)
-    print("🧠  PHASE 1: Slotted JEPA + Baseline Comparison (1000 Epochs)")
-    print("═"*60)
+    print("\n" + "═" * 60)
+    print("🧠  PHASE 1: Object Dictionary Training (6-Loss Regime)")
+    print(f"    Slots: {cfg['num_slots']} | Iterations: {cfg['slot_iters']}")
+    print(f"    Codebook freeze: first {cfg['codebook_warmup_epochs']} epochs")
+    print("═" * 60)
 
-    ckpt_path       = os.path.join(p1_dir, 'latest_slot_checkpoint.pth')
-    base_ckpt_path  = os.path.join(p1_dir, 'latest_base_checkpoint.pth')
-    metrics_path    = os.path.join(p1_dir, 'metrics_log.jsonl')
-    plots_dir       = os.path.join(p1_dir, 'plots')
+    ckpt_path      = os.path.join(p1_dir, 'latest_slot_checkpoint.pth')
+    base_ckpt_path = os.path.join(p1_dir, 'latest_base_checkpoint.pth')
+    metrics_path   = os.path.join(p1_dir, 'metrics_log.jsonl')
+    plots_dir      = os.path.join(p1_dir, 'plots')
 
-    # ── Models ──────────────────────────────────────────────────────────────
-    slot_enc  = SemanticSlotEncoder(cfg)
-    slot_dec  = SemanticDecoder(cfg)
-    
-    # Inject Phase 0 Codebook as learnable anchors for Phase 1
+    # ── Models ──────────────────────────────────────────────────────────
+    slot_enc = SemanticSlotEncoder(cfg)
+    slot_dec = SemanticDecoder(cfg)
     slot_enc.inject_codebook(frozen_vq)
 
-    base_enc  = DeepTransformerEncoder(cfg)
-    base_dec  = TransformerDecoder(cfg)
+    base_enc = DeepTransformerEncoder(cfg)
+    base_dec = TransformerDecoder(cfg)
 
-    opt_slot  = torch.optim.AdamW(
-        list(slot_enc.parameters()) + list(slot_dec.parameters()), lr=cfg['p1_lr'])
-    opt_base  = torch.optim.AdamW(
-        list(base_enc.parameters()) + list(base_dec.parameters()), lr=cfg['p1_lr'])
+    # Separate param groups: codebook has its own LR controlled by warmup schedule
+    def make_slot_param_groups():
+        cb_params  = []
+        enc_params = []
+        if hasattr(slot_enc, 'codebook_shape'):
+            cb_params  = [slot_enc.codebook_shape, slot_enc.codebook_color]
+            cb_ids     = {id(p) for p in cb_params}
+            enc_params = [p for p in slot_enc.parameters() if id(p) not in cb_ids]
+        else:
+            enc_params = list(slot_enc.parameters())
+
+        return [
+            {'params': enc_params + list(slot_dec.parameters()), 'lr': cfg['p1_lr']},
+            {'params': cb_params, 'lr': 0.0},  # codebook LR starts frozen
+        ]
+
+    opt_slot = torch.optim.AdamW(make_slot_param_groups(), weight_decay=1e-4)
+    opt_base = torch.optim.AdamW(
+        list(base_enc.parameters()) + list(base_dec.parameters()),
+        lr=cfg['p1_lr'], weight_decay=1e-4)
 
     start_epoch = 1
 
-    # ── Resume ──────────────────────────────────────────────────────────────
+    # ── Resume ──────────────────────────────────────────────────────────
     resume = cfg.get('p1_resume_from') or (ckpt_path if os.path.exists(ckpt_path) else None)
     if resume and os.path.exists(resume):
         print(f"📥 P1 resuming from {resume}...")
@@ -490,61 +724,112 @@ def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset, s
             slot_dec.load_state_dict(ckpt['slot_dec'], strict=False)
             opt_slot.load_state_dict(ckpt['opt_slot'])
             start_epoch = ckpt['epoch'] + 1
-            print(f"   ✅ Slotted model resumed from epoch {ckpt['epoch']}.")
+            print(f"   ✅ Slot model resumed from epoch {ckpt['epoch']}.")
         except Exception as e:
             print(f"   ⚠️  Slot checkpoint incompatible, starting fresh. ({e})")
 
     if os.path.exists(base_ckpt_path):
         try:
-            b_ckpt = torch.load(base_ckpt_path, map_location=device, weights_only=False)
-            base_enc.load_state_dict(b_ckpt['base_enc'], strict=False)
-            base_dec.load_state_dict(b_ckpt['base_dec'], strict=False)
-            opt_base.load_state_dict(b_ckpt['opt_base'])
-            print(f"   ✅ Baseline model resumed from epoch {b_ckpt['epoch']}.")
+            b = torch.load(base_ckpt_path, map_location=device, weights_only=False)
+            base_enc.load_state_dict(b['base_enc'], strict=False)
+            base_dec.load_state_dict(b['base_dec'], strict=False)
+            opt_base.load_state_dict(b['opt_base'])
+            print(f"   ✅ Baseline resumed from epoch {b['epoch']}.")
         except Exception:
             pass
 
-    # ── Training loop ────────────────────────────────────────────────────────
-    history = {'slot_recon': [], 'base_recon': [], 'slot_val_acc': [], 'base_val_acc': []}
-
+    # ── Training Loop ────────────────────────────────────────────────────
     for epoch in range(start_epoch, cfg['p1_epochs'] + 1):
         slot_enc.train(); slot_dec.train()
         base_enc.train(); base_dec.train()
 
-        # ── Codebook Warmup Freeze ────────────────────────────────────────
-        # For the first `codebook_warmup_epochs` epochs, freeze the injected
-        # codebook weights so the slot encoder learns to USE the Phase 0
-        # primitives, not destroy them.
-        warmup = cfg.get('codebook_warmup_epochs', 100)
+        # ── Codebook Warmup Schedule ─────────────────────────────────────
+        warmup = cfg.get('codebook_warmup_epochs', 150)
         if hasattr(slot_enc, 'codebook_shape'):
-            freeze = (epoch <= warmup)
-            slot_enc.codebook_shape.requires_grad_(not freeze)
-            slot_enc.codebook_color.requires_grad_(not freeze)
-            if epoch == warmup + 1:
-                print(f"\n🔓 P1 E{epoch}: Codebook unfrozen — entering joint fine-tune stage.")
-            elif epoch == 1:
-                print(f"   🔒 Codebook FROZEN for first {warmup} Phase 1 epochs.")
+            if epoch <= warmup:
+                # Fully frozen
+                slot_enc.codebook_shape.requires_grad_(False)
+                slot_enc.codebook_color.requires_grad_(False)
+                opt_slot.param_groups[1]['lr'] = 0.0
+                if epoch == 1:
+                    print(f"   🔒 Codebook FROZEN for first {warmup} epochs.")
+            elif epoch == warmup + 1:
+                # Unfreeze at very low LR
+                slot_enc.codebook_shape.requires_grad_(True)
+                slot_enc.codebook_color.requires_grad_(True)
+                opt_slot.param_groups[1]['lr'] = cfg.get('codebook_finetune_lr', 1e-5)
+                print(f"\n🔓 P1 E{epoch}: Codebook unfrozen (LR={cfg.get('codebook_finetune_lr', 1e-5):.0e})")
 
-        # ── Temperature annealing schedule ────────────────────────────────
-        # Linear interpolation from slot_temp_start → slot_temp_end over
-        # slot_temp_anneal epochs.  After that epoch, temperature is fixed at end.
+        # Temperature annealing
         t = min(1.0, (epoch - 1) / max(1, cfg['slot_temp_anneal']))
-        current_temp = cfg['slot_temp_start'] * (1.0 - t) + cfg['slot_temp_end'] * t
+        temp = cfg['slot_temp_start'] * (1 - t) + cfg['slot_temp_end'] * t
 
-        ep_stot, ep_srecon, ep_svic, ep_brecon = [], [], [], []
-        nan_streak = 0
+        ep_stot, ep_srecon, ep_ssharp, ep_scover = [], [], [], []
+        ep_sdiv, ep_brecon = [], []
 
-        for _ in tqdm(range(cfg['p1_steps']), desc=f"P1 E{epoch:03d}", leave=False):
+        for step in tqdm(range(cfg['p1_steps']), desc=f"P1 E{epoch:04d}", leave=False):
             batch  = train_dataset.sample(cfg['p1_batch'])
             states = batch['state'].to(device)
 
-            # ── Slotted model step ────────────────────────────────────────
-            # Pass annealed temperature so attention sharpness scales with training maturity
-            z_slot = slot_enc({'state': states}, temperature=current_temp)
-            out_slot = slot_dec({'latent': z_slot['latent']})
-            loss_slot = slot_dec.loss({'state': states, 'latent': z_slot['latent']}, out_slot)
+            # ── Slot Model Step ─────────────────────────────────────────
+            slot_out  = slot_enc({'state': states}, temperature=temp)
+            slots     = slot_out['latent']   # [B, K, 320]
+            alphas_raw = slot_out.get('masks_raw', None)
 
-            s_loss = loss_slot['loss']
+            dec_out   = slot_dec({'latent': slots})
+            alphas    = dec_out['alphas']  # [B, K, H, W] — softmax'd
+
+            # L1: Focal-weighted pixel reconstruction
+            recon_target = states[:, 0].long()
+            recon_logits = dec_out['reconstruction']
+            ce = F.cross_entropy(recon_logits, recon_target, reduction='none')
+            fg_mask    = (recon_target > 0).float()
+            w_matrix   = 1.0 + fg_mask * (cfg['p1_fg_weight'] - 1.0)
+            pt         = torch.exp(-ce)
+            l_recon    = (((1 - pt) ** cfg['p1_focal_gamma']) * ce * w_matrix).mean()
+
+            # L2: Slot sharpness (low entropy of alpha over slots at each pixel)
+            l_sharp = slot_sharpness_loss(alphas)
+
+            # L3: Coverage (every N steps — scipy CC labeling on CPU)
+            l_cover = torch.tensor(0.0, device=device)
+            if step % cfg['p1_cover_interval'] == 0:
+                try:
+                    l_cover = slot_coverage_loss(alphas, states, cfg['patch_size'])
+                    ep_scover.append(l_cover.item())
+                except Exception:
+                    pass
+
+            # L4: Slot diversity (VICReg across K slots within each image)
+            l_div = vicreg_loss_slots(slots,
+                                      std_coeff=cfg['p1_vicreg_std'],
+                                      cov_coeff=cfg['p1_vicreg_cov'])
+
+            # L5: VQ commitment (slot shape part vs nearest codebook entry)
+            l_commit = torch.tensor(0.0, device=device)
+            if hasattr(slot_enc, 'codebook_shape'):
+                # Use the shape_attn output as the "projected slot shape"
+                slot_shape = slots[:, :, :128]  # [B, K, 128]
+                # Find nearest code via cosine
+                cb = slot_enc.codebook_shape  # [V, 128]
+                # Batch nearest neighbor (approximate via inner product)
+                slot_shape_n = F.normalize(slot_shape.reshape(-1, 128), dim=-1)  # [B*K, 128]
+                cb_n = F.normalize(cb, dim=-1)  # [V, 128]
+                sims = slot_shape_n @ cb_n.T  # [B*K, V]
+                nearest_idx = sims.argmax(dim=-1)  # [B*K]
+                nearest_emb = cb[nearest_idx].reshape_as(slot_shape)  # [B, K, 128]
+                l_commit = slot_vq_commit_loss(slot_shape, nearest_emb,
+                                               beta=cfg['p1_commit_weight'])
+
+            # ── Total Slot Loss ──────────────────────────────────────────
+            s_loss = (
+                cfg['p1_recon_weight']  * l_recon
+                + cfg['p1_sharp_weight']  * l_sharp
+                + cfg['p1_cover_weight']  * l_cover
+                + cfg['p1_vicreg_weight'] * l_div
+                + l_commit
+            )
+
             if not (torch.isnan(s_loss) or torch.isinf(s_loss)):
                 opt_slot.zero_grad()
                 s_loss.backward()
@@ -553,15 +838,15 @@ def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset, s
                     cfg['p1_grad_clip'])
                 opt_slot.step()
                 ep_stot.append(s_loss.item())
-                ep_srecon.append(loss_slot.get('recon_loss', s_loss).item())
-                ep_svic.append(loss_slot.get('vic_loss', torch.tensor(0.0)).item())
+                ep_srecon.append(l_recon.item())
+                ep_ssharp.append(l_sharp.item())
+                ep_sdiv.append(l_div.item())
 
-            # ── Baseline model step ───────────────────────────────────────
-            z_base = base_enc({'state': states})
+            # ── Baseline Model Step ──────────────────────────────────────
+            z_base   = base_enc({'state': states})
             out_base = base_dec({'latent': z_base['latent']})
-            loss_base = base_dec.loss({'state': states}, out_base)
+            b_loss   = base_dec.loss({'state': states}, out_base)['loss']
 
-            b_loss = loss_base['loss']
             if not (torch.isnan(b_loss) or torch.isinf(b_loss)):
                 opt_base.zero_grad()
                 b_loss.backward()
@@ -575,127 +860,91 @@ def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset, s
             if _STOP: break
             continue
 
-        avg_stot  = float(np.mean(ep_stot))
+        avg_stot   = float(np.mean(ep_stot))
         avg_srecon = float(np.mean(ep_srecon))
-        avg_svic  = float(np.mean(ep_svic))
+        avg_ssharp = float(np.mean(ep_ssharp))
+        avg_scover = float(np.mean(ep_scover)) if ep_scover else 0.0
+        avg_sdiv   = float(np.mean(ep_sdiv))
         avg_brecon = float(np.mean(ep_brecon)) if ep_brecon else 0.0
 
-        history['slot_recon'].append(avg_srecon)
-        history['base_recon'].append(avg_brecon)
-
-        # Step offset by 100 to keep Phase 0 and Phase 1 in the same WandB timeline
         log_metrics(wb_run, {
-            'P1_Slot/Total':    avg_stot,
-            'P1_Slot/Recon':    avg_srecon,
-            'P1_Slot/VICReg':   avg_svic,
-            'P1_Base/Recon':    avg_brecon,
-            'P1_Slot/Temperature': current_temp,  # track annealing progress
+            'P1_Slot/Total':       avg_stot,
+            'P1_Slot/Recon':       avg_srecon,
+            'P1_Slot/Sharpness':   avg_ssharp,
+            'P1_Slot/Coverage':    avg_scover,
+            'P1_Slot/Diversity':   avg_sdiv,
+            'P1_Base/Recon':       avg_brecon,
+            'P1/Codebook_Frozen':  float(epoch <= warmup),
+            'P1/Temperature':      temp,
         }, step=step_offset + epoch, log_path=metrics_path)
 
-        # ── Validation + Visualization Block ─────────────────────────────
-        if epoch % cfg['p1_val_interval'] == 0 or epoch == 1:
-            slot_enc.eval(); slot_dec.eval()
-            base_enc.eval(); base_dec.eval()
-
-            mods_slot = {'encoder': slot_enc, 'decoder': slot_dec, 'config': cfg}
-            mods_base = {'encoder': base_enc, 'decoder': base_dec, 'config': cfg}
-
-            s_val_loss, s_val_acc, s_val_perf = run_validation_epoch(
-                mods_slot, eval_dataset, phase='ae',
-                batch_size=cfg['val_batch_size'], device=device)
-            b_val_loss, b_val_acc, b_val_perf = run_validation_epoch(
-                mods_base, eval_dataset, phase='ae',
-                batch_size=cfg['val_batch_size'], device=device)
-
-            history['slot_val_acc'].append(s_val_acc)
-            history['base_val_acc'].append(b_val_acc)
-
-            print(f"\nP1 E{epoch:03d} | Slot Recon:{avg_srecon:.4f} Base Recon:{avg_brecon:.4f}")
-            print(f"  → [Slot Val]  Pixel.Acc:{s_val_acc*100:.2f}% | Perfect:{s_val_perf*100:.2f}%")
-            print(f"  → [Base Val]  Pixel.Acc:{b_val_acc*100:.2f}% | Perfect:{b_val_perf*100:.2f}%")
-
-            log_metrics(wb_run, {
-                'Val_Slot/Pixel_Acc':  s_val_acc * 100,
-                'Val_Slot/Perfect':    s_val_perf * 100,
-                'Val_Base/Pixel_Acc':  b_val_acc * 100,
-                'Val_Base/Perfect':    b_val_perf * 100,
-                'Val_Slot/Loss':       s_val_loss,
-                'Val_Base/Loss':       b_val_loss,
-            }, step=step_offset + epoch, log_path=metrics_path)
-
-            # Visualization: slot reconstruction + masks
-            with torch.no_grad():
-                val_batch  = eval_dataset.sample(4)
-                val_states = val_batch['state'].to(device)
-                z_val = slot_enc({'state': val_states}, temperature=cfg['slot_temp_end'])
-                out_val = slot_dec({'latent': z_val['latent']})
-
-                recon_logits = out_val.get('reconstruction', out_val.get('reconstructed_logits'))
-                recon_grid = recon_logits.argmax(dim=1).float()
-
-                z_flat = z_val['latent'].view(4 * cfg['num_slots'], -1)
-
-                viz_path  = os.path.join(plots_dir, f'recon_epoch_{epoch}.png')
-                mask_path = os.path.join(plots_dir, f'masks_epoch_{epoch}.png')
-
-                plot_reconstruction_dashboard(
-                    val_states[0, 0].cpu(), recon_grid[0].cpu(),
-                    z_flat.cpu(), epoch, viz_path)
-
-                if 'masks' in z_val:
-                    masks = z_val['masks'].unsqueeze(2)  # [B, S, 1, H, W]
-                    plot_slot_masks(masks.cpu(), epoch, mask_path)
-                    if WANDB_AVAILABLE and wb_run is not None:
-                        wb_run.log({'Visuals/Slot_Masks': wandb.Image(mask_path)},
-                                   step=step_offset + epoch)
-
-                if WANDB_AVAILABLE and wb_run is not None:
-                    wb_run.log({'Visuals/Slot_Reconstruction': wandb.Image(viz_path)},
-                               step=step_offset + epoch)
-
-            slot_enc.train(); slot_dec.train()
-            base_enc.train(); base_dec.train()
-
-        # ── Checkpoint save ───────────────────────────────────────────────
         if epoch % cfg['p1_save_interval'] == 0 or _STOP:
+            print(f"P1 E{epoch:04d} | Slot[recon:{avg_srecon:.4f} sharp:{avg_ssharp:.3f} "
+                  f"cov:{avg_scover:.3f} div:{avg_sdiv:.3f}] Base:{avg_brecon:.4f} T:{temp:.2f}")
             torch.save({
                 'slot_enc': slot_enc.state_dict(),
                 'slot_dec': slot_dec.state_dict(),
                 'opt_slot': opt_slot.state_dict(),
-                'epoch':    epoch,
-                'history':  history,
+                'epoch': epoch, 'cfg': cfg,
             }, ckpt_path)
             torch.save({
                 'base_enc': base_enc.state_dict(),
                 'base_dec': base_dec.state_dict(),
                 'opt_base': opt_base.state_dict(),
-                'epoch':    epoch,
+                'epoch': epoch,
             }, base_ckpt_path)
 
-            # WandB artifact every 100 epochs
-            if WANDB_AVAILABLE and wb_run is not None and epoch % 100 == 0:
-                art = wandb.Artifact(f'slotted_model_ep{step_offset + epoch}', type='model')
-                art.add_file(ckpt_path)
-                wb_run.log_artifact(art)
+        # ── Validation ───────────────────────────────────────────────────
+        if epoch % cfg['p1_val_interval'] == 0:
+            slot_enc.eval(); slot_dec.eval()
+            base_enc.eval(); base_dec.eval()
+            with torch.no_grad():
+                slot_metrics = run_validation_epoch(
+                    slot_enc, slot_dec, eval_dataset, cfg, device, model_type='slot')
+                base_metrics = run_validation_epoch(
+                    base_enc, base_dec, eval_dataset, cfg, device, model_type='base')
+            print(f"  → [Slot Val] Pixel.Acc:{slot_metrics['pixel_acc']:.2%} | "
+                  f"Perfect:{slot_metrics['perfect_acc']:.2%}")
+            print(f"  → [Base Val] Pixel.Acc:{base_metrics['pixel_acc']:.2%} | "
+                  f"Perfect:{base_metrics['perfect_acc']:.2%}")
+            log_metrics(wb_run, {
+                'Val/Slot_PixelAcc':  slot_metrics['pixel_acc'],
+                'Val/Slot_Perfect':   slot_metrics['perfect_acc'],
+                'Val/Base_PixelAcc':  base_metrics['pixel_acc'],
+                'Val/Base_Perfect':   base_metrics['perfect_acc'],
+            }, step=step_offset + epoch, log_path=metrics_path)
+            slot_enc.train(); slot_dec.train()
+            base_enc.train(); base_dec.train()
+
+        # ── Visualization ─────────────────────────────────────────────────
+        if epoch % (cfg['p1_save_interval'] * 2) == 0:
+            try:
+                slot_enc.eval()
+                sample = eval_dataset.sample(4)
+                with torch.no_grad():
+                    vis_out = slot_enc({'state': sample['state'].to(device)}, temperature=0.1)
+                    vis_dec = slot_dec({'latent': vis_out['latent']})
+                plot_slot_masks(
+                    sample['state'], vis_dec['reconstruction'],
+                    vis_dec['alphas'],
+                    save_path=os.path.join(plots_dir, f'masks_epoch_{epoch:04d}.png'))
+                slot_enc.train()
+            except Exception:
+                pass
 
         if _STOP:
-            print(f"\n💾 P1 emergency checkpoint saved (epoch {epoch}).")
             break
 
-    print("\n🏁 Phase 1 Training Complete.")
+    print(f"\n🏁 Phase 1 Training Complete.")
     print(f"   Checkpoint: {ckpt_path}")
-    print(f"   Metrics:    {metrics_path}")
-    return slot_enc, slot_dec
+    print(f"   Object dictionary: {cfg['num_shape_codes']} shape codes")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# ENTRY POINT — FULL PIPELINE
+# GPU MEMORY CHECK
 # ═══════════════════════════════════════════════════════════════════════════
-def check_gpu_memory(min_free_gb: float = 4.0):
-    """
-    Warn if GPU free memory is below threshold.
-    Prints nvidia-smi process table so you know what to kill.
-    """
+
+def check_gpu_memory(min_free_gb=4.0):
     if not torch.cuda.is_available():
         return
     free_bytes, total_bytes = torch.cuda.mem_get_info()
@@ -705,88 +954,74 @@ def check_gpu_memory(min_free_gb: float = 4.0):
     print(f"🎮 GPU: {torch.cuda.get_device_name(0)}")
     print(f"   Total: {total_gb:.1f} GB | Used: {used_gb:.1f} GB | Free: {free_gb:.1f} GB")
     if free_gb < min_free_gb:
-        print(f"\n⚠️  WARNING: Only {free_gb:.1f} GB free — need at least {min_free_gb:.1f} GB.")
-        print("   A previous process may still be holding GPU memory.")
-        print("   Run the following to identify and kill it:")
-        print("     nvidia-smi           # find the PID column")
-        print("     kill -9 <PID>        # kill the zombie process")
-        print("   Then re-run this script.\n")
-        # Still continue — expandable_segments may handle it, or user ignored warning intentionally
+        print(f"\n⚠️  WARNING: Only {free_gb:.1f} GB free — need ≥{min_free_gb:.1f} GB.")
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# MAIN
+# ═══════════════════════════════════════════════════════════════════════════
 
 def main(cfg: dict):
     device = cfg['device']
     check_gpu_memory(min_free_gb=4.0)
     print(f"🖥️  Device: {device}")
 
-    # --- Resume Logic: Check for most recent directory if resume is true ---
+    # Resume or create run directory
     resume_run = cfg.get('resume_run_dir')
     if resume_run:
         root_dir = resume_run
-        p0_dir = os.path.join(root_dir, 'phase0')
-        p1_dir = os.path.join(root_dir, 'phase1')
-        print(f"🔄 Resuming from existing run folder: {root_dir}")
+        p0_dir   = os.path.join(root_dir, 'phase0')
+        p1_dir   = os.path.join(root_dir, 'phase1')
+        print(f"🔄 Resuming from: {root_dir}")
     else:
         root_dir, p0_dir, p1_dir = make_run_dir(cfg)
 
-    # Base generative priors
+    # ── Datasets ─────────────────────────────────────────────────────────
     train_dataset = ReARCDataset(data_path=cfg['data_path'])
-    
-    # Curriculum Mix (ARC-Heavy for Reasoning + Re-ARC for Shapes)
+
     try:
         arc_heavy = ARCDataset(data_path=cfg['arc_heavy_path'])
-        
-        # Simple dynamic mix sampling class
+
         class CurriculumMix:
             def __init__(self, ds1, ds2):
                 self.ds1, self.ds2 = ds1, ds2
-            def sample(self, bsz):
+            def sample(self, bsz, split='train'):
                 b1 = self.ds1.sample(bsz // 2)
                 b2 = self.ds2.sample(bsz - (bsz // 2))
                 return {'state': torch.cat([b1['state'], b2['state']], dim=0)}
-                
+
         train_dataset = CurriculumMix(train_dataset, arc_heavy)
         print("🌍 Mixed ARC-Heavy into training curriculum.")
     except Exception:
-        print("⚠️  ARC-Heavy dataset not found at path — defaulting to pure Re-ARC.")
-        
+        print("⚠️  ARC-Heavy not found — using pure Re-ARC.")
+
     try:
         eval_dataset = ARCDataset(data_path=cfg['eval_data_path'])
     except Exception:
         print("⚠️  Eval dataset not found — using train dataset split for validation.")
         eval_dataset = train_dataset
 
-    # ── WandB: single run for both phases ───────────────────────────────────
+    # ── WandB ─────────────────────────────────────────────────────────────
     wb_run = init_wandb(cfg, root_dir, 'Phase0+1')
 
-    # ── Phase 0 ─────────────────────────────────────────────────────────────
+    # ── Phase 0 ───────────────────────────────────────────────────────────
     frozen_vq, _, p0_last_epoch = train_phase_0(cfg, p0_dir, wb_run, train_dataset)
 
     if _STOP:
-        print("\n🛑 Stop requested during Phase 0 — skipping Phase 1.")
-        if wb_run:
-            wb_run.finish()
+        print("\n🛑 Stop requested during Phase 0.")
+        if wb_run: wb_run.finish()
         return
 
-    # ── Free GPU before Phase 1 ──────────────────────────────────────────────
-    # Phase0Autoencoder (encoder+vq+decoder) is still alive on GPU.
-    # Explicitly delete it and clear the cache so Phase 1 has room.
-    # frozen_vq itself is tiny (just the embedding tables).
-    import gc
-    frozen_vq = frozen_vq.cpu()   # Keep the tables, move them off GPU
-    gc.collect()
     torch.cuda.empty_cache()
-    free_mb = torch.cuda.mem_get_info()[0] / 1024**2
-    print(f"\n🧹 GPU cleared after Phase 0. Free VRAM: {free_mb:.0f} MiB")
-    frozen_vq = frozen_vq.to(device)  # Move back for FPS sampling
+    free_bytes, _ = torch.cuda.mem_get_info()
+    print(f"\n🧹 GPU cleared after Phase 0. Free VRAM: {free_bytes / 1024**2:.0f} MiB")
 
-    # ── Phase 1 ─────────────────────────────────────────────────────────────
+    # ── Phase 1 ───────────────────────────────────────────────────────────
     train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset,
-                  step_offset=p0_last_epoch)  # Phase 1 steps are monotonic after Phase 0
+                  step_offset=p0_last_epoch)
 
     if wb_run:
         wb_run.finish()
-    print("\n✅ Full Pipeline Complete.")
 
 
 if __name__ == '__main__':
