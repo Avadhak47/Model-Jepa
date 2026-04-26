@@ -896,23 +896,34 @@ def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset, s
 
         # ── Validation ───────────────────────────────────────────────────
         if epoch % cfg['p1_val_interval'] == 0:
-            slot_enc.eval(); slot_dec.eval()
-            base_enc.eval(); base_dec.eval()
-            with torch.no_grad():
-                slot_metrics = run_validation_epoch(
-                    slot_enc, slot_dec, eval_dataset, cfg, device, model_type='slot')
-                base_metrics = run_validation_epoch(
-                    base_enc, base_dec, eval_dataset, cfg, device, model_type='base')
-            print(f"  → [Slot Val] Pixel.Acc:{slot_metrics['pixel_acc']:.2%} | "
-                  f"Perfect:{slot_metrics['perfect_acc']:.2%}")
-            print(f"  → [Base Val] Pixel.Acc:{base_metrics['pixel_acc']:.2%} | "
-                  f"Perfect:{base_metrics['perfect_acc']:.2%}")
+            # run_validation_epoch(modules_dict, dataset, phase, batch_size, device)
+            # → returns (avg_loss, avg_acc, avg_perfect)
+            # It handles .eval() / .train() toggling internally.
+            slot_loss, slot_acc, slot_perfect = run_validation_epoch(
+                modules={'encoder': slot_enc, 'decoder': slot_dec},
+                dataset=eval_dataset,
+                phase='ae',
+                batch_size=cfg.get('val_batch_size', 32),
+                device=device,
+            )
+            base_loss, base_acc, base_perfect = run_validation_epoch(
+                modules={'encoder': base_enc, 'decoder': base_dec},
+                dataset=eval_dataset,
+                phase='ae',
+                batch_size=cfg.get('val_batch_size', 32),
+                device=device,
+            )
+            print(f"  → [Slot Val] Pixel.Acc:{slot_acc:.2%} | Perfect:{slot_perfect:.2%}")
+            print(f"  → [Base Val] Pixel.Acc:{base_acc:.2%} | Perfect:{base_perfect:.2%}")
             log_metrics(wb_run, {
-                'Val/Slot_PixelAcc':  slot_metrics['pixel_acc'],
-                'Val/Slot_Perfect':   slot_metrics['perfect_acc'],
-                'Val/Base_PixelAcc':  base_metrics['pixel_acc'],
-                'Val/Base_Perfect':   base_metrics['perfect_acc'],
+                'Val/Slot_PixelAcc':  slot_acc,
+                'Val/Slot_Perfect':   slot_perfect,
+                'Val/Slot_Loss':      slot_loss,
+                'Val/Base_PixelAcc':  base_acc,
+                'Val/Base_Perfect':   base_perfect,
+                'Val/Base_Loss':      base_loss,
             }, step=step_offset + epoch, log_path=metrics_path)
+            # Restore training mode (evaluator already did this, but be explicit)
             slot_enc.train(); slot_dec.train()
             base_enc.train(); base_dec.train()
 
