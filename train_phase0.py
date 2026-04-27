@@ -781,9 +781,7 @@ def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset, s
             alphas_raw = slot_out.get('masks_raw', None)
 
             dec_out   = slot_dec({'latent': slots})
-            # Decoder returns alphas as [B, K, 1, H, W] — squeeze the extra dim
-            # so sharpness and coverage losses receive the expected [B, K, H, W]
-            alphas    = dec_out['alphas'].squeeze(2)  # [B, K, H, W]
+            alphas    = dec_out['alphas']  # [B, K, H, W] — softmax'd
 
             # L1: Focal-weighted pixel reconstruction
             recon_target = states[:, 0].long()
@@ -1025,16 +1023,6 @@ def main(cfg: dict):
     # ── Phase 0 ───────────────────────────────────────────────────────────
     frozen_vq, _, p0_last_epoch = train_phase_0(cfg, p0_dir, wb_run, train_dataset)
 
-    # If Phase 0 was skipped but an existing frozen codebook was specified,
-    # load it now so Phase 1 uses the correct trained codebook (not a fresh one).
-    explicit_frozen = cfg.get('frozen_codebook_path')
-    if explicit_frozen and os.path.exists(explicit_frozen):
-        print(f"\n📦 Loading frozen codebook from: {explicit_frozen}")
-        frozen_vq.load_state_dict(
-            torch.load(explicit_frozen, map_location=cfg['device'], weights_only=True)
-        )
-        frozen_vq.to(cfg['device'])
-
     if _STOP:
         print("\n🛑 Stop requested during Phase 0.")
         if wb_run: wb_run.finish()
@@ -1090,28 +1078,13 @@ if __name__ == '__main__':
         run_dir = args.resume_run.rstrip('/')
         p0_ckpt = os.path.join(run_dir, 'phase0', 'latest_checkpoint.pth')
         p1_ckpt = os.path.join(run_dir, 'phase1', 'latest_slot_checkpoint.pth')
-        p0_frozen = os.path.join(run_dir, 'phase0', 'frozen_vq_codebook.pth')
-        if os.path.exists(p1_ckpt):
-            # Phase 1 already has a checkpoint — skip Phase 0, resume Phase 1
-            CFG['p1_resume_from'] = p1_ckpt
-            CFG['p0_epochs'] = 0           # skip Phase 0 training
-            CFG['resume_run_dir'] = run_dir
-            if os.path.exists(p0_frozen):
-                CFG['frozen_codebook_path'] = p0_frozen  # use existing frozen codebook
-                print(f"📂 Resuming Phase 1 from: {p1_ckpt}")
-                print(f"📂 Using existing frozen codebook: {p0_frozen}")
-                print("⏭️  Phase 0 auto-skipped (Phase 1 checkpoint found).")
-            else:
-                print(f"⚠️  frozen_vq_codebook.pth not found in {run_dir}/phase0/ — Phase 1 may use wrong codebook.")
-        elif os.path.exists(p0_ckpt):
-            # Only Phase 0 checkpoint — resume Phase 0
+        if os.path.exists(p0_ckpt):
             CFG['p0_resume_from'] = p0_ckpt
-            CFG['resume_run_dir'] = run_dir
             print(f"📂 Resuming Phase 0 from: {p0_ckpt}")
-        else:
-            # No checkpoints found — warn but continue with the run dir
-            CFG['resume_run_dir'] = run_dir
-            print(f"⚠️  No checkpoints found in {run_dir} — starting fresh in that directory.")
+        if os.path.exists(p1_ckpt):
+            CFG['p1_resume_from'] = p1_ckpt
+            print(f"📂 Resuming Phase 1 from: {p1_ckpt}")
+        CFG['resume_run_dir'] = run_dir
 
     if args.resume_p0:
         CFG['p0_resume_from'] = args.resume_p0
@@ -1120,17 +1093,6 @@ if __name__ == '__main__':
     if args.resume_p1:
         CFG['p1_resume_from'] = args.resume_p1
         print(f"📂 Phase 1 checkpoint: {args.resume_p1}")
-        # Infer frozen codebook from sibling phase0/ directory
-        inferred_frozen = os.path.join(
-            os.path.dirname(os.path.dirname(args.resume_p1)),
-            'phase0', 'frozen_vq_codebook.pth'
-        )
-        if os.path.exists(inferred_frozen):
-            CFG['frozen_codebook_path'] = inferred_frozen
-            print(f"📂 Auto-detected frozen codebook: {inferred_frozen}")
-        else:
-            print(f"⚠️  Could not find frozen_vq_codebook.pth next to Phase 1 checkpoint.")
-            print(f"   Expected at: {inferred_frozen}")
 
     if args.skip_p0:
         CFG['p0_epochs'] = 0
