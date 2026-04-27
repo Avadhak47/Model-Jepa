@@ -58,14 +58,14 @@ CFG = {
     'pose_dim':        64,
     'vocab_size':      10,
     'grid_size':       30,
-    'num_slots':       16,
+    'num_slots':       12,     # ← match CFG in train_phase0.py
     'slot_iters':      7,
-    'slot_temperature': 0.1,
+    'slot_temperature': 0.05,
     'slot_temp_start': 1.0,
-    'slot_temp_end':   0.1,
-    'slot_temp_anneal':300,
-    'num_shape_codes': 512,
-    'num_color_codes': 16,
+    'slot_temp_end':   0.05,
+    'slot_temp_anneal':400,
+    'num_shape_codes': 1024,   # ← match CFG in train_phase0.py
+    'num_color_codes': 32,     # ← match CFG in train_phase0.py
     'commitment_cost': 0.25,
     'focal_gamma':     2.0,
 }
