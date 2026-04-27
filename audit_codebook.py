@@ -502,8 +502,10 @@ def save_stats_json(shape_stats, color_stats, fps_shape_ids, out_dir):
 def main():
     parser = argparse.ArgumentParser(description='Audit the VQ-VAE codebook')
     parser.add_argument('--checkpoint', type=str,
-                        default='runs/FactorizedFPS-v3_2026-04-24_04-19-13/phase0/latest_checkpoint.pth',
-                        help='Path to Phase 0 checkpoint (.pth)')
+                        required=True,
+                        help='Path to Phase 0 checkpoint (required to load decoders)')
+    parser.add_argument('--p1_slot', type=str, default=None,
+                        help='Optional: Path to Phase 1 slot checkpoint to audit the EVOLVED codebook rather than the P0 one')
     parser.add_argument('--out',        type=str,
                         default='evaluation_reports/codebook_audit',
                         help='Output directory for plots and JSON')
@@ -531,6 +533,19 @@ def main():
 
     # ── Load model ───────────────────────────────────────────────────────────
     encoder, vq, decoder = load_phase0(args.checkpoint, CFG, args.device)
+
+    # ── Override Codebook if P1 is provided ──────────────────────────────────
+    if args.p1_slot and os.path.exists(args.p1_slot):
+        print(f"🔄 Overriding P0 codebook with evolved P1 codebook from: {args.p1_slot}")
+        p1_ckpt = torch.load(args.p1_slot, map_location=args.device, weights_only=False)
+        slot_state = p1_ckpt.get('slot_enc', p1_ckpt)
+        if 'codebook_shape' in slot_state:
+            with torch.no_grad():
+                vq.embedding_shape.weight.copy_(slot_state['codebook_shape'])
+                vq.embedding_color.weight.copy_(slot_state['codebook_color'])
+            print("  ✅ Successfully grafted P1 codebook into VQ module.")
+        else:
+            print("  ⚠️ Could not find 'codebook_shape' in P1 checkpoint! Using P0 codes.")
 
     # ── FPS seeds (same deterministic call as the training script) ──────────
     num_slots = CFG.get('num_slots', 10)
