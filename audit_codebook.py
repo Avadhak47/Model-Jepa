@@ -471,6 +471,44 @@ def plot_fps_seeds(vq, fps_shape_ids, out_dir):
     print(f"  → {path}")
 
 
+def calculate_health(shape_stats, color_stats):
+    """Compute an aggregate health score for the codebook."""
+    active_shapes = sum(1 for s in shape_stats if s['hits'] > 0)
+    total_shapes = len(shape_stats)
+    utilization = active_shapes / total_shapes
+    
+    # Primitives are 'healthy' if they have low entropy (sharp) 
+    # and diverse colors (if applicable).
+    avg_entropy = np.mean([s['entropy'] for s in shape_stats if s['hits'] > 0])
+    
+    # Diversification: average distance between codes (not computed here, but utilization is a proxy)
+    return {
+        'utilization': utilization,
+        'avg_entropy': avg_entropy,
+        'active_codes': active_shapes,
+        'dead_codes': total_shapes - active_shapes
+    }
+
+def print_health_comparison(p0_health, p1_health):
+    print(f"\n{'='*55}")
+    print(f" 🧪 CODEBOOK HEALTH COMPARISON (P0 vs P1)")
+    print(f"{'='*55}")
+    print(f"  Metric             | Phase 0    | Phase 1    | Change")
+    print(f"  -------------------|------------|------------|-------")
+    
+    def fmt_row(name, v0, v1, higher_is_better=True):
+        diff = v1 - v0
+        sign = "+" if diff >= 0 else "-"
+        # color logic for console? nah, just text
+        trend = "✅" if (diff > 0) == higher_is_better else "⚠️"
+        if diff == 0: trend = "—"
+        print(f"  {name:<18} | {v0:>10.3f} | {v1:>10.3f} | {sign}{abs(diff):>5.3f} {trend}")
+
+    fmt_row("Utilization (%)", p0_health['utilization']*100, p1_health['utilization']*100)
+    fmt_row("Active Codes",    p0_health['active_codes'],   p1_health['active_codes'])
+    fmt_row("Avg Entropy (↓)", p0_health['avg_entropy'],    p1_health['avg_entropy'], higher_is_better=False)
+    print(f"{'='*55}\n")
+
 def save_stats_json(shape_stats, color_stats, fps_shape_ids, out_dir):
     """Save a JSON summary for easy programmatic inspection."""
     summary = {
@@ -582,6 +620,36 @@ def main():
     plot_nearest_real_patches(shape_assigns, patch_pixels, shape_usage, args.out)
     plot_geometry_heatmaps(shape_stats, args.out)
     plot_fps_seeds(vq, fps_shape_ids, args.out)
+
+    # ── Health Scoring ───────────────────────────────────────────────────────
+    current_health = calculate_health(shape_stats, color_stats)
+
+    # If auditing P1, optionally compare to P0
+    if args.p1_slot:
+        print("\n🕵️  Auditing BASE Phase 0 codebook for health comparison...")
+        # Reload P0 weights into VQ
+        p0_ckpt = torch.load(args.checkpoint, map_location=args.device, weights_only=False)
+        p0_state = p0_ckpt.get('model', p0_ckpt)
+        with torch.no_grad():
+            vq.embedding_shape.weight.copy_(p0_state['vq.embedding_shape.weight'])
+            vq.embedding_color.weight.copy_(p0_state['vq.embedding_color.weight'])
+        
+        # Collect samples for P0
+        (s_assigns_0, _, _, _, _) = collect_patch_samples(
+            encoder, vq, dataset, CFG, args.n_batches, args.device)
+        shape_stats_0 = compute_code_stats(s_assigns_0, patch_pixels,
+                                           CFG['num_shape_codes'], "Shape (P0)")
+        p0_health = calculate_health(shape_stats_0, color_stats) # color usually doesn't change as much
+        
+        print_health_comparison(p0_health, current_health)
+        
+        # Restore P1 weights for JSON save
+        p1_ckpt = torch.load(args.p1_slot, map_location=args.device, weights_only=False)
+        slot_state = p1_ckpt.get('slot_enc', p1_ckpt)
+        with torch.no_grad():
+            vq.embedding_shape.weight.copy_(slot_state['codebook_shape'])
+            vq.embedding_color.weight.copy_(slot_state['codebook_color'])
+
     save_stats_json(shape_stats, color_stats, fps_shape_ids, args.out)
 
     print(f"\n✅ Audit complete. All outputs in: {args.out}/")
