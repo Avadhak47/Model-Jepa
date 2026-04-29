@@ -135,10 +135,19 @@ def main():
                     
                     for i in range(num_patches):
                         # Decode single patch embedding
-                        # [1, 1, D]
-                        emb = cb[i].unsqueeze(0).unsqueeze(0)
-                        # For Phase 0, we use the specific p0_model's decoder part
-                        patch_recon = p0_model.decoder({'latent_vq': emb})['reconstruction']
+                        # [1, 1, VQ_dim]
+                        emb_vq = cb[i].unsqueeze(0).unsqueeze(0)
+                        
+                        # The decoder expects full_dim (VQ_dim + Pose_dim)
+                        pose_dim = getattr(p0_model.decoder, 'pose_dim', 0)
+                        if pose_dim > 0:
+                            pose_zeros = torch.zeros(1, 1, pose_dim, device=device)
+                            emb_full = torch.cat([emb_vq, pose_zeros], dim=-1)
+                        else:
+                            emb_full = emb_vq
+                            
+                        # Decoder expects {'latent': ...} and returns 'reconstructed_logits'
+                        patch_recon = p0_model.decoder({'latent': emb_full})['reconstructed_logits']
                         patch_img = patch_recon.argmax(dim=1).squeeze().cpu().numpy()
                         
                         ax = axes[i]
