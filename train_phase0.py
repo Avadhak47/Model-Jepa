@@ -79,18 +79,18 @@ except ImportError:
 # ═══════════════════════════════════════════════════════════════════════════
 CFG = {
     # ── Run Identity ─────────────────────────────────────────────────────
-    'run_name':             'ObjectCodebook-v1',
+    'run_name':             'ObjectCodebook-Tiny-v1',
     'wandb_project':        'NS-ARC-Scaling',
 
     # ── Architecture ─────────────────────────────────────────────────────
     # Literature ref: SLATE uses 64D codebook, VQ-VAE-2 uses 128D.
-    # For ARC (10 colors, simple shapes) 128D is expressive enough.
+    # For Tiny ARC research: 32D forces extreme compression/logic.
     'device':               'cuda' if torch.cuda.is_available() else 'cpu',
     'in_channels':          10,           # One-Hot ARC colors
     'patch_size':           5,            # 30/5 = 6×6 = 36 patches per grid
-    'hidden_dim':           256,          # Encoder hidden dim (SLATE uses 64-256)
-    'latent_dim':           256,          # VQ input dim (shape 128 + color 128)
-    'pose_dim':             64,           # Continuous pose/position dim
+    'hidden_dim':           32,           # Tiny model (per user request)
+    'latent_dim':           32,           # Matches hidden_dim
+    'pose_dim':             16,           # Scaled pose dim
     'vocab_size':           10,           # ARC has 10 colors (0-9)
     'grid_size':            30,
 
@@ -691,12 +691,21 @@ def affine_contrastive_loss(slots, slots_rot):
     slots: [B, K, 320]
     slots_rot: [B, K, 320] (forward pass of rotated input)
     """
-    # Shape segment (0:128)
-    shape_orig = slots[:, :, :128]
-    shape_rot  = slots_rot[:, :, :128]
-    # Color segment (128:256)
-    color_orig = slots[:, :, 128:256]
-    color_rot  = slots_rot[:, :, 128:256]
+    # Factorized segments
+    ld = slots.shape[-1] - slots.shape[-1] // 5 # approximate or use specific dims
+    # Better: use half of latent_dim for shape/color
+    shape_dim = slots.shape[-1] // 2 if slots.shape[-1] == 256 else (slots.shape[-1] - 64) // 2
+    if slots.shape[-1] < 100: # Tiny model
+        shape_dim = 16
+        color_dim = 16
+    else:
+        shape_dim = 128
+        color_dim = 128
+        
+    shape_orig = slots[:, :, :shape_dim]
+    shape_rot  = slots_rot[:, :, :shape_dim]
+    color_orig = slots[:, :, shape_dim:shape_dim+color_dim]
+    color_rot  = slots_rot[:, :, shape_dim:shape_dim+color_dim]
     
     # MSE for invariance
     l_shape = F.mse_loss(shape_orig, shape_rot)
@@ -879,16 +888,14 @@ def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset, s
             # L5: VQ commitment (slot shape part vs nearest codebook entry)
             l_commit = torch.tensor(0.0, device=device)
             if hasattr(slot_enc, 'codebook_shape'):
-                # Use the shape_attn output as the "projected slot shape"
-                slot_shape = slots[:, :, :128]  # [B, K, 128]
-                # Find nearest code via cosine
-                cb = slot_enc.codebook_shape  # [V, 128]
-                # Batch nearest neighbor (approximate via inner product)
-                slot_shape_n = F.normalize(slot_shape.reshape(-1, 128), dim=-1)  # [B*K, 128]
-                cb_n = F.normalize(cb, dim=-1)  # [V, 128]
-                sims = slot_shape_n @ cb_n.T  # [B*K, V]
-                nearest_idx = sims.argmax(dim=-1)  # [B*K]
-                nearest_emb = cb[nearest_idx].reshape_as(slot_shape)  # [B, K, 128]
+                sd = slot_enc.codebook_shape.shape[1]
+                slot_shape = slots[:, :, :sd]  # Dynamic shape segment
+                cb = slot_enc.codebook_shape  
+                slot_shape_n = F.normalize(slot_shape.reshape(-1, sd), dim=-1)
+                cb_n = F.normalize(cb, dim=-1)
+                sims = slot_shape_n @ cb_n.T
+                nearest_idx = sims.argmax(dim=-1)
+                nearest_emb = cb[nearest_idx].reshape_as(slot_shape)
                 l_commit = slot_vq_commit_loss(slot_shape, nearest_emb,
                                                beta=cfg['p1_commit_weight'])
 
