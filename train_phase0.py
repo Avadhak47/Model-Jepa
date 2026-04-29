@@ -658,7 +658,9 @@ def train_phase_0(cfg, p0_dir, wb_run, train_dataset):
                 if wb_run:
                     wb_run.log({"P0/Factorization_Grid": wandb.Image(vis_path)}, step=epoch)
             except Exception as e:
-                print(f"   ⚠️  Phase 0 Vis failed: {e}")
+                print(f"   ⚠️  Phase 0 Vis failed at E{epoch}: {e}")
+                import traceback
+                traceback.print_exc()
 
         # ── Codebook Surgery ─────────────────────────────────────────────
         if epoch % cfg['surgery_interval'] == 0:

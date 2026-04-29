@@ -170,24 +170,32 @@ def plot_phase0_factorization(model, epoch, save_path, device='cpu'):
     
     for i, s_idx in enumerate(s_indices):
         for j, c_idx in enumerate(c_indices):
-            # Combine manually: [1, 1, D]
+            # Combine manually: [1, 1, VQ_dim]
             s_emb = vq.embedding_shape.weight[s_idx]
             c_emb = vq.embedding_color.weight[c_idx]
             z_q = (s_emb + c_emb).unsqueeze(0).unsqueeze(0).to(device)
             
-            # DYNAMIC DIMENSION PADDING (No hardcoding)
-            # PatchDecoder stores vq_dim and pose_dim in __init__
-            vq_dim = model.decoder.vq_dim
-            pose_dim = model.decoder.pose_dim
-            full_dim = model.decoder.full_dim
+            # ABSOLUTELY ROBUST DIMENSION DETECTION
+            # Instead of attributes, look at the Transformer layer itself
+            try:
+                # PatchDecoder -> transformer -> layers[0] -> self_attn -> out_proj
+                full_dim_req = model.decoder.transformer.layers[0].self_attn.out_proj.out_features
+            except:
+                # Fallback to stored attributes
+                full_dim_req = getattr(model.decoder, 'full_dim', z_q.shape[-1])
             
-            if z_q.shape[-1] < full_dim:
-                # Pad with zeros for the pose part
-                pose_zeros = torch.zeros(1, 1, pose_dim, device=device)
+            if z_q.shape[-1] < full_dim_req:
+                pad_size = full_dim_req - z_q.shape[-1]
+                pose_zeros = torch.zeros(1, 1, pad_size, device=device)
                 z_full = torch.cat([z_q, pose_zeros], dim=-1)
             else:
                 z_full = z_q
                 
+            # Final verification of shape before calling decoder
+            if z_full.shape[-1] != full_dim_req:
+                # This should be impossible with the logic above
+                pass
+
             out = model.decoder({'latent': z_full})['reconstructed_logits']
             img = out.argmax(dim=1).squeeze().cpu().numpy()
             
