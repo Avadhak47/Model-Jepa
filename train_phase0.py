@@ -171,6 +171,12 @@ CFG = {
     # L6: Codebook warmup freeze
     'codebook_warmup_epochs': 200,        # Epochs codebook is frozen (SLATE warmup)
     'codebook_finetune_lr':   5e-6,       # Very low LR when codebook unfrozen
+    
+    # NEW: Factorized Diversity Patch weights
+    'lambda_entropy':       0.15,         # Diversity: maximizes codebook usage
+    'lambda_affine':        0.4,          # Factorization: forces rotation invariance
+    'p1_resurrect_interval': 10,          # Epochs between dead-code resurrection
+    'p1_resurrect_thresh':   100,         # Minimum hits in an epoch to stay alive
 
     # ── Data Paths ───────────────────────────────────────────────────────
     'data_path':            'arc_data/re-arc/tasks',
@@ -664,6 +670,62 @@ def train_phase_0(cfg, p0_dir, wb_run, train_dataset):
     return frozen_vq, vq_path, epoch
 
 
+# ── NEW: Factorized Diversity Patch Utilities ───────────────────────────────
+
+def shannon_entropy_loss(sims, temp=0.1):
+    """
+    Computes Shannon Entropy of the codebook assignment distribution.
+    Encourages the model to use more codes (higher entropy = better).
+    """
+    # sims: [B*K, V]
+    # Calculate usage distribution over the codebook
+    probs = F.softmax(sims / temp, dim=-1).mean(dim=0)
+    entropy = -torch.sum(probs * torch.log(probs + 1e-10))
+    # We want to MAXIMIZE entropy, so minimize (MaxEntropy - currentEntropy)
+    max_entropy = math.log(sims.shape[-1])
+    return max_entropy - entropy
+
+def affine_contrastive_loss(slots, slots_rot):
+    """
+    Enforces that Shape and Color segments are invariant to rotation.
+    slots: [B, K, 320]
+    slots_rot: [B, K, 320] (forward pass of rotated input)
+    """
+    # Shape segment (0:128)
+    shape_orig = slots[:, :, :128]
+    shape_rot  = slots_rot[:, :, :128]
+    # Color segment (128:256)
+    color_orig = slots[:, :, 128:256]
+    color_rot  = slots_rot[:, :, 128:256]
+    
+    # MSE for invariance
+    l_shape = F.mse_loss(shape_orig, shape_rot)
+    l_color = F.mse_loss(color_orig, color_rot)
+    
+    return l_shape + l_color
+
+@torch.no_grad()
+def resurrect_dead_codes(slot_enc, usage_counts, thresh=50):
+    """
+    Resets codes that have been used fewer than 'thresh' times.
+    They are re-initialized to the value of a randomly selected active slot embedding.
+    """
+    if not hasattr(slot_enc, 'codebook_shape'): return 0
+    
+    dead_mask = usage_counts < thresh
+    dead_indices = dead_mask.nonzero(as_tuple=True)[0]
+    
+    if len(dead_indices) > 0:
+        # For simplicity in this patch, we just re-randomize them.
+        num_dead = len(dead_indices)
+        dim = slot_enc.codebook_shape.shape[1]
+        new_weights = torch.randn(num_dead, dim, device=slot_enc.codebook_shape.device) * 0.02
+        slot_enc.codebook_shape.data[dead_indices] = new_weights
+        return num_dead
+    return 0
+
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # PHASE 1 — OBJECT DICTIONARY TRAINING
 # ═══════════════════════════════════════════════════════════════════════════
@@ -691,6 +753,10 @@ def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset, s
     slot_enc = SemanticSlotEncoder(cfg)
     slot_dec = SemanticDecoder(cfg)
     slot_enc.inject_codebook(frozen_vq)
+    
+    # Track codebook usage for resurrection
+    usage_counts = torch.zeros(cfg.get('num_shape_codes', 1024), device=device)
+
 
     base_enc = DeepTransformerEncoder(cfg)
     base_dec = TransformerDecoder(cfg)
@@ -826,12 +892,28 @@ def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset, s
                 l_commit = slot_vq_commit_loss(slot_shape, nearest_emb,
                                                beta=cfg['p1_commit_weight'])
 
+            # L6: NEW: Entropy Regularization (Diversity)
+            l_entropy = shannon_entropy_loss(sims)
+
+            # L7: NEW: Affine Invariance (Factorization)
+            # Run second forward pass with rotated input
+            states_rot = torch.rot90(states, 1, [2, 3])
+            slot_out_rot = slot_enc({'state': states_rot}, temperature=temp)
+            slots_rot = slot_out_rot['latent']
+            l_affine = affine_contrastive_loss(slots, slots_rot)
+
+            # Update usage stats for resurrection hook
+            with torch.no_grad():
+                usage_counts[nearest_idx] += 1
+
             # ── Total Slot Loss ──────────────────────────────────────────
             s_loss = (
-                cfg['p1_recon_weight']  * l_recon
-                + cfg['p1_sharp_weight']  * l_sharp
-                + cfg['p1_cover_weight']  * l_cover
-                + cfg['p1_vicreg_weight'] * l_div
+                cfg['p1_recon_weight']   * l_recon
+                + cfg['p1_sharp_weight'] * l_sharp
+                + cfg['p1_cover_weight'] * l_cover
+                + cfg['p1_vicreg_weight']* l_div
+                + cfg['lambda_entropy']  * l_entropy
+                + cfg['lambda_affine']   * l_affine
                 + l_commit
             )
 
@@ -883,6 +965,14 @@ def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset, s
             'P1/Temperature':      temp,
         }, step=step_offset + epoch, log_path=metrics_path)
 
+        # ── End of Epoch Hooks ──────────────────────────────────────────
+        if epoch % cfg['p1_resurrect_interval'] == 0 and epoch > cfg['codebook_warmup_epochs']:
+            num_res = resurrect_dead_codes(slot_enc, usage_counts, thresh=cfg['p1_resurrect_thresh'])
+            if num_res > 0:
+                print(f"   ⚰️  Epoch {epoch}: Resurrected {num_res} dead shape codes.")
+            # Reset usage for next interval
+            usage_counts.zero_()
+            
         if epoch % cfg['p1_save_interval'] == 0 or _STOP:
             print(f"P1 E{epoch:04d} | Slot[recon:{avg_srecon:.4f} sharp:{avg_ssharp:.3f} "
                   f"cov:{avg_scover:.3f} div:{avg_sdiv:.3f}] Base:{avg_brecon:.4f} T:{temp:.2f}")
