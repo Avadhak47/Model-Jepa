@@ -21,9 +21,11 @@ from train_phase0 import Phase0Autoencoder
 from modules.semantic_encoders import SemanticSlotEncoder
 from modules.semantic_decoders import SemanticDecoder
 
-def entropy(counts):
-    total = sum(counts)
+def calculate_entropy(usage_counter, vocab_size):
+    total = sum(usage_counter.values())
     if total == 0: return 0.0
+    # Map Counter to a full distribution over vocab_size
+    counts = [usage_counter.get(i, 0) for i in range(vocab_size)]
     probs = [c / total for c in counts if c > 0]
     return -sum(p * math.log2(p) for p in probs)
 
