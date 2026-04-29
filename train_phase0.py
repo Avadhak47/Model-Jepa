@@ -109,7 +109,7 @@ CFG = {
 
     # ── Phase 0 Training ─────────────────────────────────────────────────
     # Literature: SLATE trains 100k-500k steps. ARC is simpler → 200 epochs × 200 steps.
-    'p0_epochs':            1000,
+    'p0_epochs':            500,
     'p0_steps':             200,          # Steps per epoch
     'p0_batch':             128,          # Batch size (SLATE: 64-128)
     'p0_lr':                4e-4,         # Adam learning rate (SLATE: 3e-4 to 1e-3)
@@ -144,7 +144,7 @@ CFG = {
     # ── Phase 1 Training ─────────────────────────────────────────────────
     # Literature: Object-centric models typically need 300-500k steps.
     # ARC is simpler but we need discrete codebook convergence.
-    'p1_epochs':            4000,
+    'p1_epochs':            2000,
     'p1_steps':             200,          # Steps per epoch
     'p1_batch':             128,
     'p1_lr':                1e-4,         # Lower LR than P0 (fine-tuning codebook)
