@@ -4,6 +4,7 @@ import argparse
 import torch
 import torch.nn.functional as F
 import numpy as np
+import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from collections import Counter
@@ -169,13 +170,48 @@ def main():
                 decoded = p1_dec({'latent': full_latent})
                 recon = decoded['reconstruction'].argmax(dim=1).cpu().numpy()[0] # [H, W]
                 
+                # Plotting for gallery
+                plt.figure(figsize=(4, 4))
+                plt.imshow(recon, cmap='tab10', interpolation='nearest', vmin=0, vmax=9)
+                plt.title(f"Code #{code_id}")
+                plt.axis('off')
+                plt.savefig(os.path.join(args.out_dir, f"primitive_{code_id}.png"))
+                plt.close()
+
                 # Print a small ASCII representation for the terminal audit
                 print(f"Code #{code_id} Visual Primitive (High-res stored in {args.out_dir}):")
                 for row in recon[:10, :10]: # show 10x10 slice
                     print(" ".join(str(int(p)) if p > 0 else "." for p in row))
                 print("-" * 20)
 
-    # 8. Report Summary
+    # 8. --- Generate Final Audit Plots ---
+    print(f"\n📈 Generating Final Audit Plots in {args.out_dir}...")
+    
+    # Plot 1: Utilization Histogram
+    if p1_usage:
+        plt.figure(figsize=(12, 5))
+        counts = [p1_usage[i] for i in range(vocab_size)]
+        plt.bar(range(vocab_size), counts, color='teal', alpha=0.7)
+        plt.axhline(y=np.mean(counts), color='red', linestyle='--', label='Average Usage')
+        plt.title("Phase 1: Codebook Utilization (The 'Object Vocabulary')")
+        plt.xlabel("Codebook Index")
+        plt.ylabel("Usage Count")
+        plt.legend()
+        plt.savefig(os.path.join(args.out_dir, "codebook_utilization.png"))
+        plt.close()
+
+    # Plot 2: Invariance Summary
+    if os.path.exists(p1_ckpt):
+        plt.figure(figsize=(6, 5))
+        plt.bar(['Invariance Score'], [inv_ratio], color='orange', alpha=0.8)
+        plt.ylim(0, 100)
+        plt.ylabel("Percentage (%)")
+        plt.title("Affine Invariance Test (90° Rotation)")
+        plt.grid(axis='y', linestyle='--', alpha=0.5)
+        plt.savefig(os.path.join(args.out_dir, "affine_invariance_score.png"))
+        plt.close()
+
+    # 9. Report Summary
     print("\n" + "="*50)
     print("📊 CODEBOOK AUDIT RESULTS SUMMARY")
     print("="*50)
