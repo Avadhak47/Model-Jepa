@@ -144,7 +144,7 @@ CFG = {
     # ── Phase 1 Training ─────────────────────────────────────────────────
     # Literature: Object-centric models typically need 300-500k steps.
     # ARC is simpler but we need discrete codebook convergence.
-    'p1_epochs':            3000,
+    'p1_epochs':            4000,
     'p1_steps':             200,          # Steps per epoch
     'p1_batch':             128,
     'p1_lr':                1e-4,         # Lower LR than P0 (fine-tuning codebook)

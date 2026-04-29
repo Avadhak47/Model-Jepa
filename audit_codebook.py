@@ -21,6 +21,7 @@ def entropy(counts):
     return -sum(p * math.log2(p) for p in probs)
 
 def main():
+    parser = argparse.ArgumentParser()
     parser.add_argument('--run-dir', type=str, required=True, help="Path to the run directory (e.g., runs/ObjectCodebook-v1_...)")
     parser.add_argument('--batch-size', type=int, default=16)
     parser.add_argument('--batches', type=int, default=5, help="Number of validation batches to run for the audit")
