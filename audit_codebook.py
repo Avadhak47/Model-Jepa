@@ -82,10 +82,12 @@ def main():
     # 5. Track metrics
     p0_usage = Counter()
     p1_usage = Counter()
+    p1_color_usage = Counter()
+    p1_poses = []
 
     print(f"🏃 Running {args.batches} batches to collect codebook statistics...")
     with torch.no_grad():
-        for i in range(args.batches):
+        for i in tqdm(range(args.batches)):
             batch = dataset.sample(args.batch_size)
             states = batch['state'].to(device)  # [B, 1, H, W]
             
@@ -93,25 +95,45 @@ def main():
             if os.path.exists(p0_ckpt):
                 # Run Phase 0 forward
                 # out, vq_loss, p_shape, p_color, z_vq, shape_idx
-                _, _, _, _, _, shape_idx = p0_model({'state': states}, valid_mask=None, temperature=0.1)
+                res = p0_model({'state': states}, temperature=0.1)
+                shape_idx = res[5]
                 p0_usage.update(shape_idx.flatten().cpu().numpy().tolist())
                 
-            # --- Phase 1 (Slot Vocabulary) ---
+            # --- Phase 1 (Object Vocabulary) ---
             if os.path.exists(p1_ckpt):
                 out1 = p1_enc({'state': states})
                 slots = out1['latent']  # [B, K, 320]
+                masks = out1['masks']   # [B, K, H, W]
                 
-                # Extract shape part and map to codebook
-                slot_shape = slots[:, :, :128]  # [B, K, 128]
-                if hasattr(p1_enc, 'codebook_shape'):
-                    cb = p1_enc.codebook_shape      # [V, 128]
-                    # Cosine similarity matching
-                    slot_shape_n = F.normalize(slot_shape.reshape(-1, 128), dim=-1)
-                    cb_n = F.normalize(cb, dim=-1)
-                    sims = slot_shape_n @ cb_n.T  # [B*K, V]
-                    nearest_idx = sims.argmax(dim=-1)  # [B*K]
-                    
-                    p1_usage.update(nearest_idx.cpu().numpy().tolist())
+                # A. Shape Usage (0:128)
+                slot_shape = slots[:, :, :128]
+                cb_s = p1_enc.codebook_shape
+                s_n = F.normalize(slot_shape.reshape(-1, 128), dim=-1)
+                c_s_n = F.normalize(cb_s, dim=-1)
+                sims_s = s_n @ c_s_n.T
+                p1_usage.update(sims_s.argmax(dim=-1).cpu().numpy().tolist())
+
+                # B. Color Usage (128:256)
+                slot_color = slots[:, :, 128:256]
+                cb_c = p1_enc.codebook_color
+                c_n = F.normalize(slot_color.reshape(-1, 128), dim=-1)
+                c_c_n = F.normalize(cb_c, dim=-1)
+                sims_c = c_n @ c_c_n.T
+                p1_color_usage.update(sims_c.argmax(dim=-1).cpu().numpy().tolist())
+
+                # C. Pose Centroids
+                for b in range(masks.shape[0]):
+                    for k in range(masks.shape[1]):
+                        mask = masks[b, k]
+                        if mask.sum() > 0.1:
+                            # Weighted average for centroid
+                            y_indices, x_indices = torch.meshgrid(torch.arange(30), torch.arange(30), indexing='ij')
+                            y_indices = y_indices.to(device).float()
+                            x_indices = x_indices.to(device).float()
+                            
+                            y_c = (mask * y_indices).sum() / mask.sum()
+                            x_c = (mask * x_indices).sum() / mask.sum()
+                            p1_poses.append([y_c.item(), x_c.item()])
 
     # 6. --- Affine Invariance Test ---
     if os.path.exists(p1_ckpt):
@@ -188,20 +210,36 @@ def main():
     print(f"\n📈 Generating Final Audit Plots in {args.out_dir}...")
     vocab_size = cfg.get('num_shape_codes', 128)
     
-    # Plot 1: Utilization Histogram
+    # Plot 1: Shape Utilization
     if p1_usage:
         plt.figure(figsize=(12, 5))
         counts = [p1_usage[i] for i in range(vocab_size)]
         plt.bar(range(vocab_size), counts, color='teal', alpha=0.7)
-        plt.axhline(y=np.mean(counts), color='red', linestyle='--', label='Average Usage')
-        plt.title("Phase 1: Codebook Utilization (The 'Object Vocabulary')")
-        plt.xlabel("Codebook Index")
-        plt.ylabel("Usage Count")
-        plt.legend()
-        plt.savefig(os.path.join(args.out_dir, "codebook_utilization.png"))
+        plt.title("Phase 1: Shape Codebook Utilization")
+        plt.savefig(os.path.join(args.out_dir, "shape_utilization.png"))
         plt.close()
 
-    # Plot 2: Invariance Summary
+    # Plot 2: Color Utilization
+    if p1_color_usage:
+        plt.figure(figsize=(8, 5))
+        n_colors = cfg.get('num_color_codes', 16)
+        counts = [p1_color_usage[i] for i in range(n_colors)]
+        plt.bar(range(n_colors), counts, color='magenta', alpha=0.7)
+        plt.title("Phase 1: Color Codebook Utilization")
+        plt.savefig(os.path.join(args.out_dir, "color_utilization.png"))
+        plt.close()
+
+    # Plot 3: Pose Heatmap
+    if p1_poses:
+        plt.figure(figsize=(6, 6))
+        p_arr = np.array(p1_poses)
+        plt.hexbin(p_arr[:, 1], p_arr[:, 0], gridsize=15, cmap='inferno')
+        plt.xlim(0, 30); plt.ylim(30, 0) # Invert Y for grid coordinates
+        plt.title("Phase 1: Object Pose Heatmap (Spatial Centroids)")
+        plt.savefig(os.path.join(args.out_dir, "pose_usage_heatmap.png"))
+        plt.close()
+
+    # Plot 4: Invariance Summary
     if os.path.exists(p1_ckpt):
         plt.figure(figsize=(6, 5))
         plt.bar(['Invariance Score'], [inv_ratio], color='orange', alpha=0.8)
