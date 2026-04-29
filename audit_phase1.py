@@ -47,23 +47,43 @@ ARC_NAMES  = ['Black','Blue','Red','Green','Yellow',
 # ARCH DETECTION (shared with audit_model.py)
 # ═══════════════════════════════════════════════════════════════════════════════
 def detect_arch_from_p0(ckpt_path: str) -> dict:
+    # Try to find config.json in the parent or grandparent directory first
+    run_dir = os.path.dirname(os.path.dirname(ckpt_path))
+    config_path = os.path.join(run_dir, 'config.json')
+    
+    if os.path.exists(config_path):
+        print(f"📄 Loading architecture from config: {config_path}")
+        with open(config_path, 'r') as f:
+            return json.load(f)
+
+    print("⚠️  config.json not found. Falling back to state-dict heuristics...")
     ckpt  = torch.load(ckpt_path, map_location='cpu', weights_only=False)
     state = ckpt.get('model', ckpt)
-    arch  = {'patch_size':2,'hidden_dim':128,'latent_dim':128,
-              'num_shape_codes':256,'num_color_codes':16,
-              'vocab_size':10,'grid_size':30,'in_channels':10,
-              'focal_gamma':2.0,'commitment_cost':0.25,
-              'device':'cuda' if torch.cuda.is_available() else 'cpu'}
+    
+    # We start with empty dict to avoid hardcoding hidden dims
+    arch = {'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+            'grid_size': 30, 'in_channels': 10}
+
     for key, val in state.items():
-        if 'encoder.patch_embed.weight' in key and val.dim() == 4:
-            arch['hidden_dim']  = val.shape[0]
-            arch['patch_size']  = val.shape[2]
-        if 'encoder.projector' in key and '3.weight' in key and val.dim() == 2:
-            arch['latent_dim']  = val.shape[0]
-        if 'vq.embedding_shape.weight' in key and val.dim() == 2:
+        # Hidden Dim & Patch Size
+        if 'patch_embed.weight' in key and val.dim() == 4:
+            arch['hidden_dim'] = val.shape[0]
+            arch['patch_size'] = val.shape[2]
+        
+        # Latent Dim (Projector)
+        if 'projector.3.weight' in key and val.dim() == 2:
+            arch['latent_dim'] = val.shape[0]
+            
+        # Codebook Dims
+        if 'vq.embedding_shape.weight' in key:
             arch['num_shape_codes'] = val.shape[0]
-        if 'vq.embedding_color.weight' in key and val.dim() == 2:
+        if 'vq.embedding_color.weight' in key:
             arch['num_color_codes'] = val.shape[0]
+            
+    # Final safety check for critical dims
+    if 'hidden_dim' not in arch: arch['hidden_dim'] = 128
+    if 'latent_dim' not in arch: arch['latent_dim'] = 128
+    
     return arch
 
 
