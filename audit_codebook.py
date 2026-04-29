@@ -178,37 +178,47 @@ def main():
         inv_ratio = (invariance_hits / total_objects) * 100 if total_objects > 0 else 0
         print(f"✅ Invariance Match: {inv_ratio:.1f}% of object codes survived 90° rotation.")
 
-    # 7. --- Visual Surgery (Decoding Top Codes) ---
+    # 7. --- Visual Surgery (Full Shape Codebook Map) ---
     if os.path.exists(p1_ckpt):
-        print("\n🔪 Running Visual Surgery (Decoding Top 5 Phase 1 Codes)...")
-        top_codes = [c for c, count in p1_usage.most_common(5)]
+        print(f"\n🔪 Generating Full Shape Codebook Map (128 Primitives)...")
+        num_to_show = min(vocab_size, 128)
+        cols = 16
+        rows = (num_to_show + cols - 1) // cols
         
+        fig, axes = plt.subplots(rows, cols, figsize=(cols * 1.5, rows * 1.5))
+        axes = axes.flatten()
+
         with torch.no_grad():
-            cb = p1_enc.codebook_shape # [V, 128]
-            for idx, code_id in enumerate(top_codes):
-                # Create a synthetic slot: Shape from codebook, neutral Pose/Color
-                shape_emb = cb[code_id].unsqueeze(0).unsqueeze(0) # [1, 1, 128]
-                # Fill remaining 192 dims (color + pose) with zeros
-                dummy_latent = torch.zeros((1, 1, 192), device=device)
-                full_latent = torch.cat([shape_emb, dummy_latent], dim=-1) # [1, 1, 320]
+            for i in range(num_to_show):
+                # Construct latent: Shape(i) + Neutral Color(5) + Zero Pose
+                # Color 5 is Grey in ARC
+                full_latent = torch.zeros(1, 1, 320, device=device)
+                if i < p1_enc.codebook_shape.shape[0]:
+                    full_latent[0, 0, :128] = p1_enc.codebook_shape[i]
                 
+                # We need a valid color embedding. We'll use the first one if available.
+                if hasattr(p1_enc, 'codebook_color'):
+                    full_latent[0, 0, 128:256] = p1_enc.codebook_color[min(5, p1_enc.codebook_color.shape[0]-1)]
+
                 # Decode
                 decoded = p1_dec({'latent': full_latent})
                 recon = decoded['reconstruction'].argmax(dim=1).cpu().numpy()[0] # [H, W]
                 
-                # Plotting for gallery
-                plt.figure(figsize=(4, 4))
-                plt.imshow(recon, cmap='tab10', interpolation='nearest', vmin=0, vmax=9)
-                plt.title(f"Code #{code_id}")
-                plt.axis('off')
-                plt.savefig(os.path.join(args.out_dir, f"primitive_{code_id}.png"))
-                plt.close()
+                ax = axes[i]
+                ax.imshow(recon, cmap=ARC_CMAP, vmin=0, vmax=9, interpolation='nearest')
+                ax.set_title(f"#{i}", fontsize=8)
+                ax.axis('off')
 
-                # Print a small ASCII representation for the terminal audit
-                print(f"Code #{code_id} Visual Primitive (High-res stored in {args.out_dir}):")
-                for row in recon[:10, :10]: # show 10x10 slice
-                    print(" ".join(str(int(p)) if p > 0 else "." for p in row))
-                print("-" * 20)
+        # Hide unused subplots
+        for i in range(num_to_show, len(axes)):
+            axes[i].axis('off')
+
+        plt.suptitle(f"Phase 1: Full Shape Codebook Map (Total Codes: {vocab_size})", fontsize=16)
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        map_path = os.path.join(args.out_dir, "full_shape_codebook.png")
+        plt.savefig(map_path, dpi=120)
+        plt.close()
+        print(f"✅ Full codebook map saved to {map_path}")
 
     # 8. --- Generate Final Audit Plots ---
     print(f"\n📈 Generating Final Audit Plots in {args.out_dir}...")
