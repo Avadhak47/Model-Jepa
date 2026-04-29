@@ -113,7 +113,7 @@ CFG = {
     'p0_steps':             200,          # Steps per epoch
     'p0_batch':             128,          # Batch size (SLATE: 64-128)
     'p0_lr':                4e-4,         # Adam learning rate (SLATE: 3e-4 to 1e-3)
-    'p0_lr_post_surgery':   1e-4,         # LR after codebook surgery
+    'p0_lr_post_surgery':   1e-5,         # LR after codebook surgery
     'p0_lr_warmup_epochs':  3,            # Epochs at reduced LR after surgery
     'p0_grad_clip':         2.0,          # Gradient clip (conservative for VQ)
     'p0_save_interval':     50,

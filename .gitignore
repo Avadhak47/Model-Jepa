@@ -35,3 +35,6 @@ extract.py
 
 # Training run artifacts (logs, checkpoints, plots)
 runs/
+
+# Thesis documents
+thesis/
