@@ -8,6 +8,12 @@ import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from collections import Counter
+from matplotlib.colors import ListedColormap
+
+# ── ARC colour palette ──────────────────────────────────────────────────────
+ARC_COLORS = ['#000000','#0074D9','#FF4136','#2ECC40','#FFDC00',
+               '#AAAAAA','#F012BE','#FF851B','#7FDBFF','#870C25']
+ARC_CMAP   = ListedColormap(ARC_COLORS)
 import math
 
 from arc_data.rearc_dataset import ReARCDataset
