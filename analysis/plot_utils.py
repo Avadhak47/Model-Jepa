@@ -173,12 +173,17 @@ def plot_phase0_factorization(model, epoch, save_path, device='cpu'):
             # Combine manually: [1, 1, D]
             s_emb = vq.embedding_shape.weight[s_idx]
             c_emb = vq.embedding_color.weight[c_idx]
-            z_q = (s_emb + c_emb).unsqueeze(0).unsqueeze(0)
+            z_q = (s_emb + c_emb).unsqueeze(0).unsqueeze(0).to(device)
             
-            # Pad with zero pose
-            pose_dim = getattr(model.decoder, 'pose_dim', 0)
-            if pose_dim > 0:
-                pose_zeros = torch.zeros(1, 1, pose_dim, device=z_q.device)
+            # DYNAMIC DIMENSION PADDING (No hardcoding)
+            # PatchDecoder stores vq_dim and pose_dim in __init__
+            vq_dim = model.decoder.vq_dim
+            pose_dim = model.decoder.pose_dim
+            full_dim = model.decoder.full_dim
+            
+            if z_q.shape[-1] < full_dim:
+                # Pad with zeros for the pose part
+                pose_zeros = torch.zeros(1, 1, pose_dim, device=device)
                 z_full = torch.cat([z_q, pose_zeros], dim=-1)
             else:
                 z_full = z_q
