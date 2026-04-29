@@ -134,21 +134,30 @@ def main():
                     axes = axes.flatten()
                     
                     for i in range(num_patches):
-                        # Decode single patch embedding
-                        # [1, 1, VQ_dim]
-                        emb_vq = cb[i].unsqueeze(0).unsqueeze(0)
+                    # Decode single patch embedding
+                    # [1, 1, VQ_dim]
+                    emb_vq = cb[i].unsqueeze(0).unsqueeze(0)
+                    
+                    # Robustly detect the full dimension expected by the decoder's transformer
+                    # For Tiny model: 48 (32 VQ + 16 Pose)
+                    try:
+                        # Access the first layer of the transformer to find its expected d_model
+                        full_dim = p0_model.decoder.transformer.layers[0].self_attn.out_proj.out_features
+                    except:
+                        # Fallback to cfg or standard calculations
+                        full_dim = getattr(p0_model.decoder, 'full_dim', 48)
+                    
+                    if emb_vq.shape[-1] < full_dim:
+                        pad_size = full_dim - emb_vq.shape[-1]
+                        pose_zeros = torch.zeros(1, 1, pad_size, device=device)
+                        emb_full = torch.cat([emb_vq, pose_zeros], dim=-1)
+                    else:
+                        emb_full = emb_vq
                         
-                        # The decoder expects full_dim (VQ_dim + Pose_dim)
-                        pose_dim = getattr(p0_model.decoder, 'pose_dim', 0)
-                        if pose_dim > 0:
-                            pose_zeros = torch.zeros(1, 1, pose_dim, device=device)
-                            emb_full = torch.cat([emb_vq, pose_zeros], dim=-1)
-                        else:
-                            emb_full = emb_vq
-                            
-                        # Decoder expects {'latent': ...} and returns 'reconstructed_logits'
-                        patch_recon = p0_model.decoder({'latent': emb_full})['reconstructed_logits']
-                        patch_img = patch_recon.argmax(dim=1).squeeze().cpu().numpy()
+                    # Decoder expects {'latent': ...} and returns 'reconstructed_logits' [B, 10, H, W]
+                    res_p0 = p0_model.decoder({'latent': emb_full})
+                    patch_recon = res_p0['reconstructed_logits']
+                    patch_img = patch_recon.argmax(dim=1).squeeze().cpu().numpy()
                         
                         ax = axes[i]
                         ax.imshow(patch_img, cmap=ARC_CMAP, vmin=0, vmax=9, interpolation='nearest')
