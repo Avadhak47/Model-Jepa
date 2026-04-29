@@ -104,6 +104,41 @@ def main():
                 res = p0_model({'state': states}, temperature=0.1)
                 shape_idx = res[5]
                 p0_usage.update(shape_idx.flatten().cpu().numpy().tolist())
+        
+        p0_entropy = calculate_entropy(p0_usage, vocab_size=1024)
+        
+        # --- NEW: Phase 0 Visual Gallery ---
+        print("🎨 Generating Phase 0 Patch Alphabet Gallery...")
+        with torch.no_grad():
+            # In Phase 0, p0_model is the full PatchTransformer
+            # Access the VQ codebook (shape part)
+            if hasattr(p0_model, 'vq'):
+                cb = p0_model.vq.codebook_shape.weight # [1024, D]
+                num_patches = 128
+                cols = 16
+                rows = num_patches // cols
+                
+                fig, axes = plt.subplots(rows, cols, figsize=(cols * 0.8, rows * 0.8))
+                axes = axes.flatten()
+                
+                for i in range(num_patches):
+                    # Decode single patch embedding
+                    # [1, 1, D]
+                    emb = cb[i].unsqueeze(0).unsqueeze(0)
+                    # For Phase 0, we use the specific p0_model's decoder part
+                    patch_recon = p0_model.decoder({'latent_vq': emb})['reconstruction']
+                    patch_img = patch_recon.argmax(dim=1).squeeze().cpu().numpy()
+                    
+                    ax = axes[i]
+                    ax.imshow(patch_img, cmap=ARC_CMAP, vmin=0, vmax=9, interpolation='nearest')
+                    ax.axis('off')
+                
+                plt.suptitle(f"Phase 0: Patch Alphabet (Entropy: {p0_entropy:.3f} bits)", fontsize=14)
+                plt.tight_layout()
+                p0_gallery_path = os.path.join(args.out_dir, "p0_patch_alphabet.png")
+                plt.savefig(p0_gallery_path, dpi=150)
+                plt.close()
+                print(f"✅ Phase 0 gallery saved to {p0_gallery_path}")
                 
             # --- Phase 1 (Object Vocabulary) ---
             if os.path.exists(p1_ckpt):
