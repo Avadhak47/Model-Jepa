@@ -186,6 +186,7 @@ def main():
 
     # 8. --- Generate Final Audit Plots ---
     print(f"\n📈 Generating Final Audit Plots in {args.out_dir}...")
+    vocab_size = cfg.get('num_shape_codes', 128)
     
     # Plot 1: Utilization Histogram
     if p1_usage:
