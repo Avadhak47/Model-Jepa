@@ -338,16 +338,15 @@ def main():
     print("📊 CODEBOOK AUDIT RESULTS SUMMARY")
     print("="*50)
     
-    vocab_size = cfg.get('num_shape_codes', 128)
-    
     if os.path.exists(p0_ckpt):
-        p0_ent = entropy([p0_usage[i] for i in range(vocab_size)])
+        p0_ent = calculate_entropy(p0_usage, vocab_size=1024)
         print(f"Phase 0 Entropy: {p0_ent:.3f} bits")
 
     if os.path.exists(p1_ckpt):
-        p1_ent = entropy([p1_usage[i] for i in range(vocab_size)])
+        p1_ent = calculate_entropy(p1_usage, vocab_size=cfg.get('num_shape_codes', 128))
         print(f"Phase 1 Entropy: {p1_ent:.3f} bits")
-        print(f"Invariance Score: {inv_ratio:.1f}%")
+        if 'inv_ratio' in locals():
+            print(f"Invariance Score: {inv_ratio:.1f}%")
         
     print("\n💡 Final Analysis:")
     if os.path.exists(p1_ckpt) and inv_ratio > 80:
