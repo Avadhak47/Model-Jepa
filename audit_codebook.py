@@ -48,8 +48,11 @@ def main():
     p1_dec = SemanticDecoder(cfg).to(device)
 
     # 3. Load Checkpoints
-    p0_ckpt = os.path.join(args.run_dir, 'phase0', 'checkpoint_p0.pt')
-    p1_ckpt = os.path.join(args.run_dir, 'phase1', 'checkpoint_p1.pt')
+    p0_ckpt = os.path.join(args.run_dir, 'phase0', 'latest_checkpoint.pth')
+    p1_ckpt = os.path.join(args.run_dir, 'phase1', 'latest_slot_checkpoint.pth')
+    
+    print(f"🔎 Checking P0: {p0_ckpt}")
+    print(f"🔎 Checking P1: {p1_ckpt}")
     
     if os.path.exists(p0_ckpt):
         p0_model.load_state_dict(torch.load(p0_ckpt, map_location=device)['model'])
@@ -71,7 +74,6 @@ def main():
 
     # 4. Load Data
     dataset = ReARCDataset(data_path=cfg.get('data_path', 'data/rearc'))
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
 
     # 5. Track metrics
     p0_usage = Counter()
@@ -79,9 +81,8 @@ def main():
 
     print(f"🏃 Running {args.batches} batches to collect codebook statistics...")
     with torch.no_grad():
-        for i, batch in enumerate(tqdm(loader, total=args.batches)):
-            if i >= args.batches: break
-            
+        for i in range(args.batches):
+            batch = dataset.sample(args.batch_size)
             states = batch['state'].to(device)  # [B, 1, H, W]
             
             # --- Phase 0 (Patch Alphabet) ---
@@ -114,8 +115,8 @@ def main():
         invariance_hits = 0
         total_objects = 0
         
-        # Take a single batch for rotation test
-        batch = next(iter(loader))
+        # Take a single sample for rotation test
+        batch = dataset.sample(1)
         states = batch['state'].to(device) # [B, 1, H, W]
         
         def get_codes(x):
