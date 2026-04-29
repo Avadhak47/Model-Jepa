@@ -181,6 +181,7 @@ def main():
     # 7. --- Visual Surgery (Full Shape Codebook Map) ---
     if os.path.exists(p1_ckpt):
         print(f"\n🔪 Generating Full Shape Codebook Map (128 Primitives)...")
+        vocab_size = cfg.get('num_shape_codes', 128)
         num_to_show = min(vocab_size, 128)
         cols = 16
         rows = (num_to_show + cols - 1) // cols
