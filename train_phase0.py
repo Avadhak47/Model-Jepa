@@ -64,7 +64,12 @@ from modules.vq import FactorizedVectorQuantizer
 from modules.semantic_encoders import SemanticSlotEncoder
 from modules.semantic_decoders import SemanticDecoder
 from analysis.evaluator import run_validation_epoch
-from analysis.plot_utils import plot_reconstruction_dashboard, plot_slot_masks
+from analysis.plot_utils import (
+    plot_reconstruction_dashboard, 
+    plot_slot_masks,
+    plot_phase0_factorization,
+    plot_phase1_object_summary
+)
 
 try:
     import wandb
@@ -497,6 +502,17 @@ def train_phase_0(cfg, p0_dir, wb_run, train_dataset):
                                weight_decay=1e-4, betas=(0.9, 0.999))
 
     start_epoch = 1
+    # ── Quick Exit if skipping ──────────────────────────────────────────
+    if cfg.get('p0_epochs', 1) <= 0:
+        print("⏭️  Skipping Phase 0 training (p0_epochs <= 0).")
+        # Ensure we still load a checkpoint if provided
+        resume = cfg.get('p0_resume_from') or (ckpt_path if os.path.exists(ckpt_path) else None)
+        if resume and os.path.exists(resume):
+            print(f"📥 Loading existing Phase 0 alphabet from {resume}...")
+            ckpt = torch.load(resume, map_location=device, weights_only=False)
+            model.load_state_dict(ckpt['model'], strict=False)
+        return model.vq, model.encoder, 0
+
     epoch       = 0
     post_surg_cd = 0
 
@@ -633,6 +649,16 @@ def train_phase_0(cfg, p0_dir, wb_run, train_dataset):
                   f"Aff:{avg_aff:.3f} τ:{tau:.2f}")
             torch.save({'model': model.state_dict(), 'opt': opt.state_dict(),
                         'epoch': epoch, 'cfg': cfg}, ckpt_path)
+
+        # ── Visualization ─────────────────────────────────────────────────
+        if epoch % 10 == 0 or epoch == 1:
+            try:
+                vis_path = os.path.join(p0_dir, f"factorization_e{epoch:04d}.png")
+                plot_phase0_factorization(model, epoch, vis_path, device=device)
+                if wb_run:
+                    wb_run.log({"P0/Factorization_Grid": wandb.Image(vis_path)}, step=epoch)
+            except Exception as e:
+                print(f"   ⚠️  Phase 0 Vis failed: {e}")
 
         # ── Codebook Surgery ─────────────────────────────────────────────
         if epoch % cfg['surgery_interval'] == 0:
@@ -1035,8 +1061,22 @@ def train_phase_1(cfg, p1_dir, wb_run, frozen_vq, train_dataset, eval_dataset, s
                 slot_enc.eval()
                 sample = eval_dataset.sample(4)
                 with torch.no_grad():
+                    # 1. Slot Visualisation
                     vis_out = slot_enc({'state': sample['state'].to(device)}, temperature=0.1)
                     vis_dec = slot_dec({'latent': vis_out['latent']})
+                    
+                    vis_path = os.path.join(p1_dir, f"object_summary_e{epoch:04d}.png")
+                    plot_phase1_object_summary(sample['state'], vis_dec, slot_enc, epoch, vis_path)
+                    
+                    if wb_run:
+                        wb_run.log({"P1/Object_Diagnostic": wandb.Image(vis_path)}, step=step_offset + epoch)
+                    
+                    # 2. Basic Dashboard (Backward compatibility)
+                    dash_path = os.path.join(p1_dir, f"dashboard_e{epoch:04d}.png")
+                    plot_reconstruction_dashboard(
+                        sample['state'][0], vis_dec['reconstruction'][0], 
+                        vis_out['latent'][0].flatten(), epoch, dash_path
+                    )
                 plot_slot_masks(
                     sample['state'], vis_dec['reconstruction'],
                     vis_dec['alphas'],

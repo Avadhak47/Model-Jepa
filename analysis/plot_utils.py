@@ -145,3 +145,137 @@ def plot_slot_masks(alphas, epoch, save_path):
     plt.savefig(save_path, dpi=150)
     plt.close(fig)
     return save_path
+
+# ── ARC COLOR MAP ────────────────────────────────────────────────────────────
+ARC_COLORS = ["#000000", "#0074D9", "#FF4136", "#2ECC40", "#FFDC00", 
+              "#AAAAAA", "#F012BE", "#FF851B", "#7FDBFF", "#870C25"]
+from matplotlib.colors import ListedColormap
+ARC_CMAP = ListedColormap(ARC_COLORS)
+
+@torch.no_grad()
+def plot_phase0_factorization(model, epoch, save_path, device='cpu'):
+    """
+    Diagnostic plot to verify that Shape and Color are truly factorized in Phase 0.
+    Generates a matrix of 5 shapes across 5 colors.
+    """
+    model.eval()
+    vq = model.vq
+    
+    # 1. Get 5 Shape codes and 5 Color codes (avoiding BG codes 0-2)
+    s_indices = [3, 10, 20, 50, 100]
+    c_indices = [3, 7, 12, 18, 25]
+    
+    fig, axes = plt.subplots(len(s_indices), len(c_indices), figsize=(12, 12))
+    fig.suptitle(f"Phase 0 Factorization Sweep (Shape vs Color) - Epoch {epoch}", fontsize=16)
+    
+    for i, s_idx in enumerate(s_indices):
+        for j, c_idx in enumerate(c_indices):
+            # Combine manually: [1, 1, D]
+            s_emb = vq.embedding_shape.weight[s_idx]
+            c_emb = vq.embedding_color.weight[c_idx]
+            z_q = (s_emb + c_emb).unsqueeze(0).unsqueeze(0)
+            
+            # Pad with zero pose
+            pose_dim = getattr(model.decoder, 'pose_dim', 0)
+            if pose_dim > 0:
+                pose_zeros = torch.zeros(1, 1, pose_dim, device=z_q.device)
+                z_full = torch.cat([z_q, pose_zeros], dim=-1)
+            else:
+                z_full = z_q
+                
+            out = model.decoder({'latent': z_full})['reconstructed_logits']
+            img = out.argmax(dim=1).squeeze().cpu().numpy()
+            
+            ax = axes[i, j]
+            ax.imshow(img, cmap=ARC_CMAP, vmin=0, vmax=9)
+            if i == 0: ax.set_title(f"Color {c_idx}")
+            if j == 0: ax.set_ylabel(f"Shape {s_idx}")
+            ax.set_xticks([]); ax.set_yticks([])
+            
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.savefig(save_path, dpi=120)
+    plt.close(fig)
+
+@torch.no_grad()
+def plot_phase1_object_summary(states, outputs, slot_enc, epoch, save_path):
+    """
+    Comprehensive Object-Centric Validation for Phase 1.
+    Rows: Each Slot (Mask, Shape Reconstruction, Color Distribution)
+    Header: Original vs Global Reconstruction vs Error Heatmap
+    """
+    import torch.nn.functional as F
+    
+    # states: [B, 1, 30, 30], recon: [B, 10, 30, 30], alphas: [B, K, 1, 30, 30]
+    orig  = states[0, 0].cpu().numpy()
+    recon = outputs['reconstruction'][0].argmax(dim=0).cpu().numpy()
+    alphas = outputs['alphas'][0].cpu().numpy() # [K, 1, 30, 30]
+    slots_latent = outputs.get('latent', None)  # [B, K, D]
+    
+    K = alphas.shape[0]
+    num_vis_slots = min(K, 8) # Limit to first 8 slots for clarity
+    
+    fig = plt.figure(figsize=(16, 4 + 2 * num_vis_slots))
+    gs = fig.add_gridspec(num_vis_slots + 1, 4)
+    fig.suptitle(f"Phase 1: Object-Centric Diagnostic - Epoch {epoch}", fontsize=20)
+
+    # --- Header Row ---
+    ax_orig = fig.add_subplot(gs[0, 0])
+    ax_orig.imshow(orig, cmap=ARC_CMAP, vmin=0, vmax=9)
+    ax_orig.set_title("Original Input")
+    
+    ax_recon = fig.add_subplot(gs[0, 1])
+    ax_recon.imshow(recon, cmap=ARC_CMAP, vmin=0, vmax=9)
+    ax_recon.set_title("Full Reconstruction")
+    
+    ax_err = fig.add_subplot(gs[0, 2])
+    error = (orig != recon).astype(float)
+    sns.heatmap(error, ax=ax_err, cmap="Reds", cbar=False)
+    ax_err.set_title("Error Heatmap")
+
+    # --- Slot-by-Slot Rows ---
+    for k in range(num_vis_slots):
+        # 1. Alpha Mask
+        ax_mask = fig.add_subplot(gs[k+1, 0])
+        ax_mask.imshow(alphas[k, 0], cmap='magma', vmin=0, vmax=1)
+        ax_mask.set_ylabel(f"Slot {k}", fontsize=12, fontweight='bold')
+        if k == 0: ax_mask.set_title("Alpha Mask")
+        
+        # 2. Individual Slot Reconstruction (Primitive)
+        # We can extract the color predicted for this slot specifically
+        # colors: [B, K, 10, H, W]
+        slot_colors = outputs['colors'][0, k].argmax(dim=0).cpu().numpy()
+        ax_prim = fig.add_subplot(gs[k+1, 1])
+        # Mask the color by its own alpha to see the "object" clearly
+        ax_prim.imshow(slot_colors, cmap=ARC_CMAP, vmin=0, vmax=9, alpha=0.8)
+        if k == 0: ax_prim.set_title("Slot Primitive")
+        
+        # 3. Color distribution for this slot
+        ax_hist = fig.add_subplot(gs[k+1, 2])
+        # Get logits for this slot's pixels
+        logits = outputs['colors'][0, k].permute(1, 2, 0).cpu().numpy() # [H, W, 10]
+        # Weight by alpha
+        mask_flat = alphas[k, 0].flatten()
+        logits_flat = logits.reshape(-1, 10)
+        weighted_probs = (np.exp(logits_flat) / np.sum(np.exp(logits_flat), axis=1, keepdims=True)) * mask_flat[:, None]
+        dist = weighted_probs.mean(axis=0)
+        ax_hist.bar(range(10), dist, color=ARC_COLORS)
+        ax_hist.set_ylim(0, 1.1)
+        if k == 0: ax_hist.set_title("Color Distribution")
+
+        # 4. Nearest Code IDs (Symbolic Mapping)
+        if slots_latent is not None:
+            ax_text = fig.add_subplot(gs[k+1, 3])
+            ax_text.axis('off')
+            
+            # Find nearest VQ codes for this slot (Shape/Color)
+            # Need access to the codebook weights
+            vq = slot_enc.codebook_shape # [1024, D_s]
+            z_s = slots_latent[0, k, :vq.shape[1]]
+            dist_s = torch.cdist(z_s.unsqueeze(0), vq).argmin().item()
+            
+            info = f"Symbolic ID:\nShape: #{dist_s}\nColor: Variable"
+            ax_text.text(0.1, 0.5, info, fontsize=12, family='monospace')
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.savefig(save_path, dpi=120)
+    plt.close(fig)
