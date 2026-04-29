@@ -86,7 +86,12 @@ def detect_slot_params(slot_ckpt_path: str) -> dict:
         sh = state['semantic_priors'].shape
         params['num_slots']      = sh[1]
         params['slot_embed_dim'] = sh[2]
-    # patch_embed: [embed_dim, 12, patch_size, patch_size]
+    # slot_sampler_queries: [1, num_slots, embed_dim]
+    elif 'slot_sampler_queries' in state:
+        sh = state['slot_sampler_queries'].shape
+        params['num_slots']      = sh[1]
+        params['slot_embed_dim'] = sh[2]
+    # patch_embed: [embed_dim, 1, patch_size, patch_size]
     if 'patch_embed.weight' in state:
         sh = state['patch_embed.weight'].shape
         params['slot_embed_dim'] = sh[0]
