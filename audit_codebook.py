@@ -1,661 +1,198 @@
-"""
-Codebook Audit Tool
-===================
-Answers: "What features are actually stored in our VQ-VAE codebook?"
-
-Strategy — three complementary lenses:
-
-  1. DECODE-DIRECT  : Feed each codebook vector through the PatchDecoder and
-                      render what 2×2 pixel patch it reconstructs. Pure lookup.
-
-  2. NEAREST-REAL   : Sample 10 000 real patches from the training set, encode
-                      them, then for every code show the 8 REAL training patches
-                      that landed closest to it in latent space. This reveals
-                      what genuine grid structures the code has specialised on.
-
-  3. GEOMETRY       : For each code compute the mean colour distribution,
-                      dominant ARC colour, mean Sobel edge magnitude, and entropy.
-                      Printed as a stats table and plotted as heatmaps so you can
-                      tell colour codes from structure codes at a glance.
-
-  4. USAGE & FPS    : Bar chart of code utilisation + scatter showing which 10
-                      codes were selected as FPS seeds for the Phase 1 slots.
-
-Run from the repo root:
-    python audit_codebook.py --checkpoint runs/.../phase0/latest_checkpoint.pth
-                             --out       evaluation_reports/codebook_audit
-                             --n_batches 80   # batches of 128 to sample
-"""
-
-import argparse, os, sys, json
+import os
+import json
+import argparse
 import torch
 import torch.nn.functional as F
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-from matplotlib.colors import ListedColormap
+from torch.utils.data import DataLoader
 from tqdm import tqdm
+from collections import Counter
+import math
 
-sys.path.insert(0, os.path.dirname(__file__))
 from arc_data.rearc_dataset import ReARCDataset
-from modules.encoders import PatchTransformerEncoder
-from modules.decoders import PatchDecoder
-from modules.vq      import FactorizedVectorQuantizer
+from train_phase0 import Phase0Autoencoder
+from modules.semantic_encoders import SemanticSlotEncoder
+from modules.semantic_decoders import SemanticDecoder
+
+def entropy(counts):
+    total = sum(counts)
+    if total == 0: return 0.0
+    probs = [c / total for c in counts if c > 0]
+    return -sum(p * math.log2(p) for p in probs)
 
-# ── ARC colour palette ──────────────────────────────────────────────────────
-ARC_COLORS = [
-    '#000000', '#0074D9', '#FF4136', '#2ECC40',
-    '#FFDC00', '#AAAAAA', '#F012BE', '#FF851B',
-    '#7FDBFF', '#870C25',
-]
-ARC_CMAP = ListedColormap(ARC_COLORS)
-
-# ═══════════════════════════════════════════════════════════════════════════
-# HELPERS
-# ═══════════════════════════════════════════════════════════════════════════
-def detect_arch_from_p0(ckpt_path: str) -> dict:
-    ckpt  = torch.load(ckpt_path, map_location='cpu', weights_only=False)
-    state = ckpt.get('model', ckpt)
-    arch  = {'patch_size':5, 'hidden_dim':256, 'latent_dim':256, 'pose_dim':64,
-              'num_shape_codes':512, 'num_color_codes':16,
-              'vocab_size':10, 'grid_size':30, 'in_channels':10,
-              'focal_gamma':2.0, 'commitment_cost':0.25}
-    for key, val in state.items():
-        if 'encoder.patch_embed.weight' in key and val.dim() == 4:
-            arch['hidden_dim']  = val.shape[0]
-            arch['patch_size']  = val.shape[2]
-            print(f"  🔎 Detected patch_size={arch['patch_size']}, hidden_dim={arch['hidden_dim']} from '{key}'")
-        if 'encoder.projector' in key and val.dim() == 2:
-            # New Dual Pathway detection
-            full_latent = val.shape[0]
-            # If weight is from PatchTransformerEncoder, it's latent_dim + pose_dim
-            # We'll try to find vq.embedding_shape to confirm latent_dim
-            pass
-        if 'vq.embedding_shape.weight' in key and val.dim() == 2:
-            arch['num_shape_codes'] = val.shape[0]
-            arch['latent_dim'] = val.shape[1] * 2
-            print(f"  🔎 Detected num_shape_codes={arch['num_shape_codes']}, latent_dim={arch['latent_dim']} from '{key}'")
-        if 'vq.embedding_color.weight' in key and val.dim() == 2:
-            arch['num_color_codes'] = val.shape[0]
-            print(f"  🔎 Detected num_color_codes={arch['num_color_codes']} from '{key}'")
-    # Derive pose_dim if possible
-    for key, val in state.items():
-        if 'encoder.projector' in key and val.dim() == 2:
-            arch['pose_dim'] = val.shape[0] - arch['latent_dim']
-            print(f"  🔎 Derived pose_dim={arch['pose_dim']} from projector output {val.shape[0]}")
-        if 'rope_attn.cos_emb' in key:
-            # head_dim is the last dimension of RoPE embeddings
-            head_dim = val.shape[-1]
-            arch['num_heads'] = arch['hidden_dim'] // head_dim
-            print(f"  🔎 Detected num_heads={arch['num_heads']} (head_dim={head_dim}) from '{key}'")
-    return arch
-
-def load_phase0(ckpt_path: str, cfg: dict, device: str):
-    """Load the full Phase 0 autoencoder from a saved checkpoint."""
-    encoder = PatchTransformerEncoder(cfg).to(device)
-    decoder = PatchDecoder(cfg).to(device)
-    vq = FactorizedVectorQuantizer(
-        num_shape_codes=cfg['num_shape_codes'],
-        num_color_codes=cfg['num_color_codes'],
-        embedding_dim  =cfg['latent_dim'],
-        commitment_cost=cfg['commitment_cost'],
-    ).to(device)
-
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-    state = ckpt.get('model', ckpt)
-
-    # Strip "encoder.", "vq.", "decoder." prefixes if present
-    enc_state  = {k.replace('encoder.', '', 1): v for k, v in state.items() if k.startswith('encoder.')}
-    vq_state   = {k.replace('vq.', '',      1): v for k, v in state.items() if k.startswith('vq.')}
-    dec_state  = {k.replace('decoder.', '', 1): v for k, v in state.items() if k.startswith('decoder.')}
-
-    encoder.load_state_dict(enc_state, strict=False)
-    vq.load_state_dict(vq_state,       strict=False)
-    decoder.load_state_dict(dec_state, strict=False)
-
-    encoder.eval(); vq.eval(); decoder.eval()
-    return encoder, vq, decoder
-
-
-def patch_to_pixel(patch_tensor: torch.Tensor) -> np.ndarray:
-    """
-    Decode a single 2×2 patch latent through the decoder and return a
-    (2, 2) integer ARC colour array.  We embed the patch as a 15×15 grid
-    of identical vectors, decode the full 30×30 grid, then crop the top-left
-    2×2 to get the patch primitive.
-    """
-    # patch_tensor: [128] — one codebook vector
-    # PatchDecoder expects [B, N, C] where N=225 patches
-    z = patch_tensor.unsqueeze(0).unsqueeze(0).expand(1, 225, -1)  # [1, 225, 128]
-    return z
-
-
-@torch.no_grad()
-def decode_single_code(decoder, code_vec: torch.Tensor, device: str,
-                       num_patches: int = 36, pose_dim: int = 64) -> np.ndarray:
-    """
-    Tile a single code vector + neutral pose across all num_patches.
-    Returns a (30, 30) integer grid.
-    """
-    z_vq = code_vec.unsqueeze(0).unsqueeze(0).expand(1, num_patches, -1).to(device)
-    z_pose = torch.zeros(1, num_patches, pose_dim, device=device)
-    
-    # Combine pathways as expected by PatchDecoder
-    z_full = torch.cat([z_vq, z_pose], dim=-1)
-    
-    out = decoder({'latent': z_full})
-    logits = out['reconstructed_logits']     # [1, 10, 30, 30]
-    grid = logits.argmax(dim=1).squeeze(0).cpu().numpy()
-    return grid
-
-
-@torch.no_grad()
-def collect_patch_samples(encoder, vq, dataset, cfg: dict,
-                           n_batches: int, device: str):
-    """
-    Run n_batches through the encoder+VQ and collect per-patch statistics.
-
-    Returns:
-        shape_assigns : list[int]  — shape code index for every real patch
-        color_assigns : list[int]  — color code index for every real patch
-        patch_pixels  : list[np.ndarray (2,2)] — actual pixel values for every patch
-        shape_usage   : np.ndarray (256,) — total hits per shape code
-        color_usage   : np.ndarray (16,)  — total hits per color code
-    """
-    shape_assigns, color_assigns, patch_pixels = [], [], []
-    shape_usage = np.zeros(cfg['num_shape_codes'], dtype=np.int64)
-    color_usage = np.zeros(cfg['num_color_codes'], dtype=np.int64)
-
-    patch_size = cfg['patch_size']
-    grid_size  = cfg['grid_size']
-    Ph = Pw    = grid_size // patch_size
-
-    for _ in tqdm(range(n_batches), desc="Sampling real patches"):
-        batch  = dataset.sample(cfg['batch_size'])
-        states = batch['state'].to(device)   # [B, 1, 30, 30]
-        B      = states.shape[0]
-
-        z_out = encoder({'state': states})
-        z_vq  = z_out['latent_vq'] # [B, N, D]
-        B, N, D = z_vq.shape
-        flat_z = z_vq.view(-1, D)
-        
-        flat_shape = flat_z[:, :D//2]
-        flat_color = flat_z[:, D//2:]
-
-        dist_shape  = (flat_shape.pow(2).sum(1, keepdim=True)
-                       + vq.embedding_shape.weight.pow(2).sum(1)
-                       - 2 * flat_shape @ vq.embedding_shape.weight.T)
-        dist_color  = (flat_color.pow(2).sum(1, keepdim=True)
-                       + vq.embedding_color.weight.pow(2).sum(1)
-                       - 2 * flat_color @ vq.embedding_color.weight.T)
-
-        s_idx = dist_shape.argmin(1).cpu().numpy()   # [B*225]
-        c_idx = dist_color.argmin(1).cpu().numpy()
-
-        # Extract actual pixel patches
-        state_np = states.squeeze(1).cpu().numpy()   # [B, 30, 30]
-        for b in range(B):
-            for ph in range(Ph):
-                for pw in range(Pw):
-                    loc = b * Ph * Pw + ph * Pw + pw
-                    pixel_patch = state_np[b,
-                                           ph*patch_size:(ph+1)*patch_size,
-                                           pw*patch_size:(pw+1)*patch_size]  # (2,2)
-                    # Skip pure padding patches (all zeros)
-                    if pixel_patch.max() == 0:
-                        continue
-                    shape_assigns.append(s_idx[loc])
-                    color_assigns.append(c_idx[loc])
-                    patch_pixels.append(pixel_patch.astype(np.int32))
-
-        shape_usage += np.bincount(s_idx, minlength=cfg['num_shape_codes'])
-        color_usage += np.bincount(c_idx, minlength=cfg['num_color_codes'])
-
-    print(f"  ℹ️  Patch pixel size: {cfg['patch_size']}×{cfg['patch_size']} pixels per code entry")
-    return shape_assigns, color_assigns, patch_pixels, shape_usage, color_usage
-
-
-def compute_code_stats(assigns, patch_pixels, num_codes, label="Shape"):
-    """
-    For each code, compute:
-      - dominant ARC colour
-      - colour entropy
-      - mean Sobel edge magnitude (proxy for structure complexity)
-    """
-    from scipy.ndimage import generic_filter
-
-    stats = []
-    assigns = np.array(assigns)
-    for c in range(num_codes):
-        mask    = assigns == c
-        patches = [patch_pixels[i] for i in np.where(mask)[0]]
-        n_hits  = len(patches)
-
-        if n_hits == 0:
-            stats.append({'code': c, 'hits': 0, 'dominant_color': -1,
-                          'entropy': 0.0, 'edge_mag': 0.0})
-            continue
-
-        all_pixels = np.concatenate([p.flatten() for p in patches])
-        counts     = np.bincount(all_pixels.clip(0, 9), minlength=10)
-        probs      = counts / counts.sum()
-        entropy    = -np.sum(probs * np.log(probs + 1e-10))
-        dominant   = int(np.argmax(counts))
-
-        # Sobel proxy: variance over the 2×2 patch colours ≈ edge-ness
-        edge_vals = [np.std(p.astype(float)) for p in patches]
-        edge_mag  = float(np.mean(edge_vals))
-
-        stats.append({'code': c, 'hits': n_hits, 'dominant_color': dominant,
-                      'entropy': entropy, 'edge_mag': edge_mag})
-    return stats
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# PLOT FUNCTIONS
-# ═══════════════════════════════════════════════════════════════════════════
-
-def plot_decoded_primitives(decoder, vq, device, out_dir):
-    """Panel 1: decoded 30×30 grid for every shape code (256 tiles)."""
-    print("🎨 Decoding shape codebook primitives...")
-    ncols = 32
-    nrows = (vq.num_shape_codes + ncols - 1) // ncols
-
-    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 1.2, nrows * 1.2))
-    fig.suptitle(f"Shape Codebook — Decoded Primitives (patch_size={decoder.patch_size})\n"
-                 "(Each tile = what the decoder produces when the whole grid is this code)",
-                 fontsize=13, y=1.01)
-
-    num_patches = decoder.num_patches_per_grid
-    pose_dim = decoder.pose_dim if hasattr(decoder, 'pose_dim') else 64
-    for i, ax in enumerate(axes.flat):
-        if i >= vq.num_shape_codes:
-            ax.axis('off')
-            continue
-        # Full structural code vector: shape code + first color code
-        shape_vec = vq.embedding_shape.weight[i]
-        color_vec = vq.embedding_color.weight[0]
-        code_vec  = torch.cat([shape_vec, color_vec]) 
-        grid      = decode_single_code(decoder, code_vec, device, 
-                                       num_patches=num_patches, pose_dim=pose_dim)
-        ax.imshow(grid, cmap=ARC_CMAP, vmin=0, vmax=9, interpolation='nearest')
-        ax.set_title(f'{i}', fontsize=5, pad=1)
-        ax.axis('off')
-
-    plt.tight_layout()
-    path = os.path.join(out_dir, '1_shape_codebook_primitives.png')
-    plt.savefig(path, dpi=120, bbox_inches='tight')
-    plt.close()
-    print(f"  → {path}")
-
-
-def plot_color_primitives(decoder, vq, device, out_dir):
-    """Panel 2: decoded primitives for all 16 color codes."""
-    print("🎨 Decoding color codebook primitives...")
-    ncols = 8
-    nrows = 2
-
-    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 2, nrows * 2.5))
-    fig.suptitle("Color Codebook — Decoded Primitives (16 entries)\n"
-                 "(Shape code fixed to code-0; only color varies)",
-                 fontsize=13)
-
-    num_patches = decoder.num_patches_per_grid
-    pose_dim = decoder.pose_dim if hasattr(decoder, 'pose_dim') else 64
-    shape_vec = vq.embedding_shape.weight[0]  # neutral shape
-    for i, ax in enumerate(axes.flat):
-        if i >= vq.num_color_codes:
-            ax.axis('off')
-            continue
-        color_vec = vq.embedding_color.weight[i]
-        code_vec  = torch.cat([shape_vec, color_vec])
-        grid      = decode_single_code(decoder, code_vec, device, 
-                                       num_patches=num_patches, pose_dim=pose_dim)
-        ax.imshow(grid, cmap=ARC_CMAP, vmin=0, vmax=9, interpolation='nearest')
-        ax.set_title(f'Color-{i}', fontsize=9)
-        ax.axis('off')
-
-    plt.tight_layout()
-    path = os.path.join(out_dir, '2_color_codebook_primitives.png')
-    plt.savefig(path, dpi=120, bbox_inches='tight')
-    plt.close()
-    print(f"  → {path}")
-
-
-def plot_usage_bars(shape_usage, color_usage, fps_shape_ids, out_dir):
-    """Panel 3: usage histogram + FPS seed markers."""
-    print("📊 Plotting usage histograms...")
-
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(20, 8))
-
-    colors_s = ['#e74c3c' if i in fps_shape_ids else '#3498db'
-                for i in range(len(shape_usage))]
-    ax1.bar(range(len(shape_usage)), shape_usage, color=colors_s, width=1.0)
-    ax1.set_title(f'Shape Codebook Usage  (red = FPS seed for Phase 1 slots)\n'
-                  f'Active codes: {(shape_usage > 0).sum()}/{len(shape_usage)}', fontsize=12)
-    ax1.set_xlabel('Code Index')
-    ax1.set_ylabel('Total assignements')
-
-    ax2.bar(range(len(color_usage)), color_usage, color='#2ecc71', width=0.8)
-    ax2.set_title(f'Color Codebook Usage\n'
-                  f'Active codes: {(color_usage > 0).sum()}/{len(color_usage)}', fontsize=12)
-    ax2.set_xlabel('Code Index')
-    ax2.set_ylabel('Total assignments')
-
-    plt.tight_layout()
-    path = os.path.join(out_dir, '3_usage_histograms.png')
-    plt.savefig(path, dpi=120, bbox_inches='tight')
-    plt.close()
-    print(f"  → {path}")
-
-
-def plot_nearest_real_patches(shape_assigns, patch_pixels, shape_usage, out_dir,
-                               top_n=40, n_examples=8):
-    """Panel 4: For the top-N most-used shape codes, show real training patches nearest to them."""
-    print(f"🔍 Plotting {n_examples} real patches for top-{top_n} used shape codes...")
-    top_codes = np.argsort(shape_usage)[::-1][:top_n]
-    assigns   = np.array(shape_assigns)
-
-    ncols = n_examples + 1   # code index label + n example patches
-    nrows = top_n
-
-    fig, axes = plt.subplots(nrows, ncols,
-                              figsize=(ncols * 0.9, nrows * 0.9))
-    fig.suptitle(f"Top-{top_n} Most-Used Shape Codes → Real Training Patches",
-                 fontsize=14, y=1.005)
-
-    for row, code in enumerate(top_codes):
-        mask    = assigns == code
-        patches = [patch_pixels[i] for i in np.where(mask)[0][:n_examples]]
-
-        # Label column
-        axes[row, 0].text(0.5, 0.5, f'S-{code}\n({shape_usage[code]:,})',
-                          ha='center', va='center', fontsize=6,
-                          transform=axes[row, 0].transAxes)
-        axes[row, 0].axis('off')
-
-        for col in range(1, ncols):
-            ax = axes[row, col]
-            if col - 1 < len(patches):
-                ax.imshow(patches[col-1], cmap=ARC_CMAP,
-                           vmin=0, vmax=9, interpolation='nearest')
-            ax.axis('off')
-
-    plt.tight_layout()
-    path = os.path.join(out_dir, '4_top_codes_real_patches.png')
-    plt.savefig(path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  → {path}")
-
-
-def plot_geometry_heatmaps(shape_stats, out_dir):
-    """Panel 5: per-code geometry stats as heatmaps (hits, entropy, edge magnitude, dominant colour)."""
-    print("🗺️  Plotting geometry heatmaps...")
-    N      = len(shape_stats)
-    # Flexible grid sizing: aim for 32 columns for large codebooks
-    side_w = 32 if N > 32 else N
-    side_h = (N + side_w - 1) // side_w
-    
-    # Pad stats list if not a perfect multiple
-    flat_hits = [s['hits'] for s in shape_stats]
-    flat_ent  = [s['entropy'] for s in shape_stats]
-    flat_edge = [s['edge_mag'] for s in shape_stats]
-    flat_dom  = [s['dominant_color'] for s in shape_stats]
-    
-    while len(flat_hits) < (side_w * side_h):
-        flat_hits.append(0); flat_ent.append(0.0); flat_edge.append(0.0); flat_dom.append(-1)
-
-    hits = np.array(flat_hits).reshape(side_h, side_w)
-    ent  = np.array(flat_ent).reshape(side_h, side_w)
-    edge = np.array(flat_edge).reshape(side_h, side_w)
-    dom  = np.array(flat_dom).reshape(side_h, side_w).astype(float)
-    dom[dom < 0] = np.nan
-
-    fig, axes = plt.subplots(2, 2, figsize=(16, 4 + 4 * (side_h / 8)))
-    fig.suptitle(f"Shape Codebook Geometry Analysis ({side_h}×{side_w} layout of {N} codes)",
-                 fontsize=14)
-
-    def hmap(ax, data, title, cmap):
-        im = ax.imshow(data, cmap=cmap, interpolation='nearest')
-        ax.set_title(title, fontsize=11)
-        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-
-    hmap(axes[0,0], hits, 'Utilisation (total patch hits)', 'Blues')
-    hmap(axes[0,1], ent,  'Colour Entropy\n(high = multi-colour patches)',  'RdYlGn')
-    hmap(axes[1,0], edge, 'Mean Edge Magnitude\n(high = structured detail)', 'hot')
-    hmap(axes[1,1], dom,  'Dominant ARC Colour Index\n(0=black…9=maroon)',   ARC_CMAP)
-
-    plt.tight_layout()
-    path = os.path.join(out_dir, '5_shape_geometry_heatmaps.png')
-    plt.savefig(path, dpi=130, bbox_inches='tight')
-    plt.close()
-    print(f"  → {path}")
-
-
-def plot_fps_seeds(vq, fps_shape_ids, out_dir):
-    """Panel 6: PCA of shape codebook vectors with FPS seeds highlighted."""
-    try:
-        from sklearn.decomposition import PCA
-    except ImportError:
-        print("⚠️  sklearn not available — skipping PCA plot")
-        return
-
-    print("🔵 Plotting FPS seeds in PCA space...")
-    W   = vq.embedding_shape.weight.detach().cpu().numpy()   # [256, 64]
-    pca = PCA(n_components=2)
-    W2  = pca.fit_transform(W)
-
-    fig, ax = plt.subplots(figsize=(10, 8))
-    ax.scatter(W2[:, 0], W2[:, 1], c='#95a5a6', s=18, alpha=0.6, label='All codes')
-    fps_pts = W2[fps_shape_ids]
-    ax.scatter(fps_pts[:, 0], fps_pts[:, 1], c='#e74c3c', s=120,
-               zorder=5, marker='*', label='FPS seeds (Phase 1 slots)')
-    for i, idx in enumerate(fps_shape_ids):
-        ax.annotate(f'Slot {i}\n(S-{idx})', W2[idx],
-                    fontsize=7, ha='center', xytext=(0, 8),
-                    textcoords='offset points')
-
-    ax.set_title(f'Shape Codebook — PCA Projection\n'
-                 f'Var explained: PC1={pca.explained_variance_ratio_[0]:.1%}  '
-                 f'PC2={pca.explained_variance_ratio_[1]:.1%}',
-                 fontsize=12)
-    ax.legend()
-    ax.set_xlabel('PC 1'); ax.set_ylabel('PC 2')
-
-    path = os.path.join(out_dir, '6_fps_seeds_pca.png')
-    plt.savefig(path, dpi=130, bbox_inches='tight')
-    plt.close()
-    print(f"  → {path}")
-
-
-def calculate_health(shape_stats, color_stats):
-    """Compute an aggregate health score for the codebook."""
-    active_shapes = sum(1 for s in shape_stats if s['hits'] > 0)
-    total_shapes = len(shape_stats)
-    utilization = active_shapes / total_shapes
-    
-    # Primitives are 'healthy' if they have low entropy (sharp) 
-    # and diverse colors (if applicable).
-    avg_entropy = np.mean([s['entropy'] for s in shape_stats if s['hits'] > 0])
-    
-    # Diversification: average distance between codes (not computed here, but utilization is a proxy)
-    return {
-        'utilization': utilization,
-        'avg_entropy': avg_entropy,
-        'active_codes': active_shapes,
-        'dead_codes': total_shapes - active_shapes
-    }
-
-def print_health_comparison(p0_health, p1_health):
-    print(f"\n{'='*55}")
-    print(f" 🧪 CODEBOOK HEALTH COMPARISON (P0 vs P1)")
-    print(f"{'='*55}")
-    print(f"  Metric             | Phase 0    | Phase 1    | Change")
-    print(f"  -------------------|------------|------------|-------")
-    
-    def fmt_row(name, v0, v1, higher_is_better=True):
-        diff = v1 - v0
-        sign = "+" if diff >= 0 else "-"
-        # color logic for console? nah, just text
-        trend = "✅" if (diff > 0) == higher_is_better else "⚠️"
-        if diff == 0: trend = "—"
-        print(f"  {name:<18} | {v0:>10.3f} | {v1:>10.3f} | {sign}{abs(diff):>5.3f} {trend}")
-
-    fmt_row("Utilization (%)", p0_health['utilization']*100, p1_health['utilization']*100)
-    fmt_row("Active Codes",    p0_health['active_codes'],   p1_health['active_codes'])
-    fmt_row("Avg Entropy (↓)", p0_health['avg_entropy'],    p1_health['avg_entropy'], higher_is_better=False)
-    print(f"{'='*55}\n")
-
-def save_stats_json(shape_stats, color_stats, fps_shape_ids, out_dir):
-    """Save a JSON summary for easy programmatic inspection."""
-    summary = {
-        'fps_shape_codes': [int(x) for x in fps_shape_ids],
-        'shape_codebook': shape_stats,
-        'color_codebook': color_stats,
-    }
-    path = os.path.join(out_dir, 'codebook_stats.json')
-    with open(path, 'w') as f:
-        json.dump(summary, f, indent=2)
-    print(f"  → {path}")
-
-    # Print quick terminal summary
-    active_shapes = sum(1 for s in shape_stats if s['hits'] > 0)
-    active_colors = sum(1 for s in color_stats  if s['hits'] > 0)
-    print(f"\n{'='*55}")
-    print(f"  Shape codebook:  {active_shapes}/{len(shape_stats)} codes active")
-    print(f"  Color codebook:  {active_colors}/{len(color_stats)} codes active")
-    print(f"  FPS shape seeds: {fps_shape_ids}")
-    dead_shapes = [s['code'] for s in shape_stats if s['hits'] == 0]
-    if dead_shapes:
-        print(f"  Dead shape codes ({len(dead_shapes)}): {dead_shapes[:20]}{'...' if len(dead_shapes)>20 else ''}")
-    print(f"{'='*55}\n")
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# MAIN
-# ═══════════════════════════════════════════════════════════════════════════
 def main():
-    parser = argparse.ArgumentParser(description='Audit the VQ-VAE codebook')
-    parser.add_argument('--checkpoint', type=str,
-                        required=True,
-                        help='Path to Phase 0 checkpoint (required to load decoders)')
-    parser.add_argument('--p1_slot', type=str, default=None,
-                        help='Optional: Path to Phase 1 slot checkpoint to audit the EVOLVED codebook rather than the P0 one')
-    parser.add_argument('--out',        type=str,
-                        default='evaluation_reports/codebook_audit',
-                        help='Output directory for plots and JSON')
-    parser.add_argument('--n_batches',  type=int, default=80,
-                        help='Number of batches of 128 to sample from training set')
-    parser.add_argument('--data_path',  type=str, default='arc_data/re-arc')
-    parser.add_argument('--device',     type=str,
-                        default='cuda' if torch.cuda.is_available() else 'cpu')
+    parser.add_argument('--run-dir', type=str, required=True, help="Path to the run directory (e.g., runs/ObjectCodebook-v1_...)")
+    parser.add_argument('--batch-size', type=int, default=16)
+    parser.add_argument('--batches', type=int, default=5, help="Number of validation batches to run for the audit")
+    parser.add_argument('--out-dir', type=str, default='audit_results', help="Where to save audit plots/logs")
     args = parser.parse_args()
 
-    os.makedirs(args.out, exist_ok=True)
-    print(f"🔬 Codebook Audit")
-    print(f"   Checkpoint : {args.checkpoint}")
-    print(f"   Output dir : {args.out}")
-    print(f"   Device     : {args.device}")
+    os.makedirs(args.out_dir, exist_ok=True)
 
-    # Auto-detect architecture dims from the checkpoint
-    CFG = detect_arch_from_p0(args.checkpoint)
-    CFG['device'] = args.device
-    CFG['batch_size'] = 128
-    num_patches = (CFG['grid_size'] // CFG['patch_size']) ** 2
-    print(f"   patch_size : {CFG['patch_size']}  →  {num_patches} patches per grid "
-          f"({CFG['grid_size']//CFG['patch_size']}×{CFG['grid_size']//CFG['patch_size']})")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"🔍 Starting Codebook Audit on device: {device}")
 
+    # 1. Load config
+    config_path = os.path.join(args.run_dir, 'config.json')
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Config not found at {config_path}")
+    with open(config_path, 'r') as f:
+        cfg = json.load(f)
+    cfg['device'] = device
 
-    # ── Load model ───────────────────────────────────────────────────────────
-    encoder, vq, decoder = load_phase0(args.checkpoint, CFG, args.device)
+    # 2. Instantiate Models
+    print("📦 Loading models...")
+    p0_model = Phase0Autoencoder(cfg).to(device)
+    p1_enc = SemanticSlotEncoder(cfg).to(device)
+    p1_dec = SemanticDecoder(cfg).to(device)
 
-    # ── Override Codebook if P1 is provided ──────────────────────────────────
-    if args.p1_slot and os.path.exists(args.p1_slot):
-        print(f"🔄 Overriding P0 codebook with evolved P1 codebook from: {args.p1_slot}")
-        p1_ckpt = torch.load(args.p1_slot, map_location=args.device, weights_only=False)
-        slot_state = p1_ckpt.get('slot_enc', p1_ckpt)
-        if 'codebook_shape' in slot_state:
-            with torch.no_grad():
-                vq.embedding_shape.weight.copy_(slot_state['codebook_shape'])
-                vq.embedding_color.weight.copy_(slot_state['codebook_color'])
-            print("  ✅ Successfully grafted P1 codebook into VQ module.")
-        else:
-            print("  ⚠️ Could not find 'codebook_shape' in P1 checkpoint! Using P0 codes.")
+    # 3. Load Checkpoints
+    p0_ckpt = os.path.join(args.run_dir, 'phase0', 'checkpoint_p0.pt')
+    p1_ckpt = os.path.join(args.run_dir, 'phase1', 'checkpoint_p1.pt')
+    
+    if os.path.exists(p0_ckpt):
+        p0_model.load_state_dict(torch.load(p0_ckpt, map_location=device)['model'])
+        print("✅ Phase 0 Checkpoint loaded.")
+    else:
+        print("⚠️  Phase 0 Checkpoint not found! Skipping Phase 0 audit.")
 
-    # ── FPS seeds (same deterministic call as the training script) ──────────
-    num_slots = CFG.get('num_slots', 10)
-    fps_slots          = vq.get_farthest_point_samples(target_slots=num_slots)
-    # Extract only the structural part of the FPS seed
-    vq_half = CFG['latent_dim'] // 2
-    fps_shape_latents  = fps_slots[0, :, :vq_half]
-    W                  = vq.embedding_shape.weight.data
-    dists              = torch.cdist(fps_shape_latents, W)
-    fps_shape_ids      = dists.argmin(dim=1).cpu().tolist()
-    print(f"\n🎯 FPS seed → shape codes: {fps_shape_ids}")
+    if os.path.exists(p1_ckpt):
+        state1 = torch.load(p1_ckpt, map_location=device)
+        p1_enc.load_state_dict(state1['slot_enc'])
+        p1_dec.load_state_dict(state1['slot_dec'])
+        print("✅ Phase 1 Checkpoint loaded.")
+    else:
+        print("⚠️  Phase 1 Checkpoint not found! Skipping Phase 1 audit.")
 
-    # ── Sample real patches ──────────────────────────────────────────────────
-    dataset = ReARCDataset(data_path=args.data_path)
-    (shape_assigns, color_assigns, patch_pixels,
-     shape_usage, color_usage) = collect_patch_samples(
-         encoder, vq, dataset, CFG, args.n_batches, args.device)
+    p0_model.eval()
+    p1_enc.eval()
+    p1_dec.eval()
 
-    print(f"\n✅ Collected {len(patch_pixels):,} real (non-padded) patch samples")
+    # 4. Load Data
+    dataset = ReARCDataset(data_path=cfg.get('data_path', 'data/rearc'))
+    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
 
-    # ── Per-code stats ───────────────────────────────────────────────────────
-    print("📈 Computing per-code geometry stats...")
-    shape_stats = compute_code_stats(shape_assigns, patch_pixels,
-                                     CFG['num_shape_codes'], "Shape")
-    color_stats = compute_code_stats(color_assigns,  patch_pixels,
-                                     CFG['num_color_codes'], "Color")
+    # 5. Track metrics
+    p0_usage = Counter()
+    p1_usage = Counter()
 
-    # ── Generate all panels ──────────────────────────────────────────────────
+    print(f"🏃 Running {args.batches} batches to collect codebook statistics...")
     with torch.no_grad():
-        plot_decoded_primitives(decoder, vq, args.device, args.out)
-        plot_color_primitives(decoder, vq, args.device, args.out)
+        for i, batch in enumerate(tqdm(loader, total=args.batches)):
+            if i >= args.batches: break
+            
+            states = batch['state'].to(device)  # [B, 1, H, W]
+            
+            # --- Phase 0 (Patch Alphabet) ---
+            if os.path.exists(p0_ckpt):
+                # Run Phase 0 forward
+                # out, vq_loss, p_shape, p_color, z_vq, shape_idx
+                _, _, _, _, _, shape_idx = p0_model({'state': states}, valid_mask=None, temperature=0.1)
+                p0_usage.update(shape_idx.flatten().cpu().numpy().tolist())
+                
+            # --- Phase 1 (Slot Vocabulary) ---
+            if os.path.exists(p1_ckpt):
+                out1 = p1_enc({'state': states})
+                slots = out1['latent']  # [B, K, 320]
+                
+                # Extract shape part and map to codebook
+                slot_shape = slots[:, :, :128]  # [B, K, 128]
+                if hasattr(p1_enc, 'codebook_shape'):
+                    cb = p1_enc.codebook_shape      # [V, 128]
+                    # Cosine similarity matching
+                    slot_shape_n = F.normalize(slot_shape.reshape(-1, 128), dim=-1)
+                    cb_n = F.normalize(cb, dim=-1)
+                    sims = slot_shape_n @ cb_n.T  # [B*K, V]
+                    nearest_idx = sims.argmax(dim=-1)  # [B*K]
+                    
+                    p1_usage.update(nearest_idx.cpu().numpy().tolist())
 
-    plot_usage_bars(shape_usage, color_usage, fps_shape_ids, args.out)
-    plot_nearest_real_patches(shape_assigns, patch_pixels, shape_usage, args.out)
-    plot_geometry_heatmaps(shape_stats, args.out)
-    plot_fps_seeds(vq, fps_shape_ids, args.out)
+    # 6. --- Affine Invariance Test ---
+    if os.path.exists(p1_ckpt):
+        print("\n🔄 Running Affine Invariance Test (Rotations)...")
+        invariance_hits = 0
+        total_objects = 0
+        
+        # Take a single batch for rotation test
+        batch = next(iter(loader))
+        states = batch['state'].to(device) # [B, 1, H, W]
+        
+        def get_codes(x):
+            with torch.no_grad():
+                out = p1_enc({'state': x})
+                slots = out['latent'] # [B, K, 320]
+                shape_p = slots[:, :, :128]
+                cb = p1_enc.codebook_shape
+                s_n = F.normalize(shape_p.reshape(-1, 128), dim=-1)
+                c_n = F.normalize(cb, dim=-1)
+                indices = (s_n @ c_n.T).argmax(dim=-1).reshape(slots.shape[0], slots.shape[1])
+                return indices.cpu().numpy()
 
-    # ── Health Scoring ───────────────────────────────────────────────────────
-    current_health = calculate_health(shape_stats, color_stats)
+        orig_codes = get_codes(states) # [B, K]
+        
+        # Rotate 90 degrees
+        states_90 = torch.rot90(states, k=1, dims=[2, 3])
+        rot_codes = get_codes(states_90) # [B, K]
+        
+        # In Slot Attention, slots are permutation invariant, so we check set intersection
+        for b in range(states.shape[0]):
+            set_orig = set(orig_codes[b])
+            set_rot = set(rot_codes[b])
+            # Intersection tells us which codes survived the rotation
+            hits = len(set_orig.intersection(set_rot))
+            invariance_hits += hits
+            total_objects += len(set_orig)
+            
+        inv_ratio = (invariance_hits / total_objects) * 100 if total_objects > 0 else 0
+        print(f"✅ Invariance Match: {inv_ratio:.1f}% of object codes survived 90° rotation.")
 
-    # If auditing P1, optionally compare to P0
-    if args.p1_slot:
-        print("\n🕵️  Auditing BASE Phase 0 codebook for health comparison...")
-        # Reload P0 weights into VQ
-        p0_ckpt = torch.load(args.checkpoint, map_location=args.device, weights_only=False)
-        p0_state = p0_ckpt.get('model', p0_ckpt)
+    # 7. --- Visual Surgery (Decoding Top Codes) ---
+    if os.path.exists(p1_ckpt):
+        print("\n🔪 Running Visual Surgery (Decoding Top 5 Phase 1 Codes)...")
+        top_codes = [c for c, count in p1_usage.most_common(5)]
+        
         with torch.no_grad():
-            vq.embedding_shape.weight.copy_(p0_state['vq.embedding_shape.weight'])
-            vq.embedding_color.weight.copy_(p0_state['vq.embedding_color.weight'])
-        
-        # Collect samples for P0
-        (s_assigns_0, _, _, _, _) = collect_patch_samples(
-            encoder, vq, dataset, CFG, args.n_batches, args.device)
-        shape_stats_0 = compute_code_stats(s_assigns_0, patch_pixels,
-                                           CFG['num_shape_codes'], "Shape (P0)")
-        p0_health = calculate_health(shape_stats_0, color_stats) # color usually doesn't change as much
-        
-        print_health_comparison(p0_health, current_health)
-        
-        # Restore P1 weights for JSON save
-        p1_ckpt = torch.load(args.p1_slot, map_location=args.device, weights_only=False)
-        slot_state = p1_ckpt.get('slot_enc', p1_ckpt)
-        with torch.no_grad():
-            vq.embedding_shape.weight.copy_(slot_state['codebook_shape'])
-            vq.embedding_color.weight.copy_(slot_state['codebook_color'])
+            cb = p1_enc.codebook_shape # [V, 128]
+            for idx, code_id in enumerate(top_codes):
+                # Create a synthetic slot: Shape from codebook, neutral Pose/Color
+                shape_emb = cb[code_id].unsqueeze(0).unsqueeze(0) # [1, 1, 128]
+                # Fill remaining 192 dims (color + pose) with zeros
+                dummy_latent = torch.zeros((1, 1, 192), device=device)
+                full_latent = torch.cat([shape_emb, dummy_latent], dim=-1) # [1, 1, 320]
+                
+                # Decode
+                decoded = p1_dec({'latent': full_latent})
+                recon = decoded['reconstruction'].argmax(dim=1).cpu().numpy()[0] # [H, W]
+                
+                # Print a small ASCII representation for the terminal audit
+                print(f"Code #{code_id} Visual Primitive (High-res stored in {args.out_dir}):")
+                for row in recon[:10, :10]: # show 10x10 slice
+                    print(" ".join(str(int(p)) if p > 0 else "." for p in row))
+                print("-" * 20)
 
-    save_stats_json(shape_stats, color_stats, fps_shape_ids, args.out)
+    # 8. Report Summary
+    print("\n" + "="*50)
+    print("📊 CODEBOOK AUDIT RESULTS SUMMARY")
+    print("="*50)
+    
+    vocab_size = cfg.get('num_shape_codes', 128)
+    
+    if os.path.exists(p0_ckpt):
+        p0_ent = entropy([p0_usage[i] for i in range(vocab_size)])
+        print(f"Phase 0 Entropy: {p0_ent:.3f} bits")
 
-    print(f"\n✅ Audit complete. All outputs in: {args.out}/")
-    print("   Run `scp` to copy to your Mac:")
-    print(f"   scp -r eet242799@10.225.67.239:~/development/Model-Jepa/{args.out} ~/Desktop/")
-
+    if os.path.exists(p1_ckpt):
+        p1_ent = entropy([p1_usage[i] for i in range(vocab_size)])
+        print(f"Phase 1 Entropy: {p1_ent:.3f} bits")
+        print(f"Invariance Score: {inv_ratio:.1f}%")
+        
+    print("\n💡 Final Analysis:")
+    if os.path.exists(p1_ckpt) and inv_ratio > 80:
+        print("🌟 EXCELLENT: High Invariance Score confirms objects are assigned stable codes regardless of pose.")
+    elif os.path.exists(p1_ckpt) and inv_ratio < 40:
+        print("⚠️  POOR: Low Invariance Score suggests the model is 'memorizing' pose+shape together. Check VICReg weights.")
+    
+    print("="*50)
 
 if __name__ == '__main__':
     main()
