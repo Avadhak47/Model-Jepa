@@ -134,30 +134,27 @@ def main():
                     axes = axes.flatten()
                     
                     for i in range(num_patches):
-                    # Decode single patch embedding
-                    # [1, 1, VQ_dim]
-                    emb_vq = cb[i].unsqueeze(0).unsqueeze(0)
-                    
-                    # Robustly detect the full dimension expected by the decoder's transformer
-                    # For Tiny model: 48 (32 VQ + 16 Pose)
-                    try:
-                        # Access the first layer of the transformer to find its expected d_model
-                        full_dim = p0_model.decoder.transformer.layers[0].self_attn.out_proj.out_features
-                    except:
-                        # Fallback to cfg or standard calculations
-                        full_dim = getattr(p0_model.decoder, 'full_dim', 48)
-                    
-                    if emb_vq.shape[-1] < full_dim:
-                        pad_size = full_dim - emb_vq.shape[-1]
-                        pose_zeros = torch.zeros(1, 1, pad_size, device=device)
-                        emb_full = torch.cat([emb_vq, pose_zeros], dim=-1)
-                    else:
-                        emb_full = emb_vq
+                        # Decode single patch embedding
+                        # [1, 1, VQ_dim]
+                        emb_vq = cb[i].unsqueeze(0).unsqueeze(0)
                         
-                    # Decoder expects {'latent': ...} and returns 'reconstructed_logits' [B, 10, H, W]
-                    res_p0 = p0_model.decoder({'latent': emb_full})
-                    patch_recon = res_p0['reconstructed_logits']
-                    patch_img = patch_recon.argmax(dim=1).squeeze().cpu().numpy()
+                        # DYNAMIC DIMENSION CALCULATION (No hardcoding)
+                        # Use the config loaded from the run directory
+                        vq_dim_cfg = cfg.get('latent_dim', emb_vq.shape[-1])
+                        pose_dim_cfg = cfg.get('pose_dim', 0)
+                        full_dim_req = vq_dim_cfg + pose_dim_cfg
+                        
+                        if emb_vq.shape[-1] < full_dim_req:
+                            pad_size = full_dim_req - emb_vq.shape[-1]
+                            pose_zeros = torch.zeros(1, 1, pad_size, device=device)
+                            emb_full = torch.cat([emb_vq, pose_zeros], dim=-1)
+                        else:
+                            emb_full = emb_vq
+                            
+                        # Decoder expects {'latent': ...} and returns 'reconstructed_logits' [B, 10, H, W]
+                        res_p0 = p0_model.decoder({'latent': emb_full})
+                        patch_recon = res_p0['reconstructed_logits']
+                        patch_img = patch_recon.argmax(dim=1).squeeze().cpu().numpy()
                         
                         ax = axes[i]
                         ax.imshow(patch_img, cmap=ARC_CMAP, vmin=0, vmax=9, interpolation='nearest')
