@@ -57,6 +57,9 @@ def main():
     if os.path.exists(p0_ckpt):
         p0_model.load_state_dict(torch.load(p0_ckpt, map_location=device)['model'])
         print("✅ Phase 0 Checkpoint loaded.")
+        # We MUST inject the codebook into Phase 1 encoder so the parameters exist for loading
+        print("💉 Injecting codebook into Phase 1 encoder...")
+        p1_enc.inject_codebook(p0_model.vq)
     else:
         print("⚠️  Phase 0 Checkpoint not found! Skipping Phase 0 audit.")
 
