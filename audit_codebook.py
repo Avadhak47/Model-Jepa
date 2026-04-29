@@ -127,13 +127,17 @@ def main():
                         mask = masks[b, k]
                         if mask.sum() > 0.1:
                             # Weighted average for centroid
-                            y_indices, x_indices = torch.meshgrid(torch.arange(30), torch.arange(30), indexing='ij')
+                            gh, gw = mask.shape
+                            y_indices, x_indices = torch.meshgrid(torch.arange(gh), torch.arange(gw), indexing='ij')
                             y_indices = y_indices.to(device).float()
                             x_indices = x_indices.to(device).float()
                             
                             y_c = (mask * y_indices).sum() / mask.sum()
                             x_c = (mask * x_indices).sum() / mask.sum()
-                            p1_poses.append([y_c.item(), x_c.item()])
+                            
+                            # Scale to 30x30 coordinates
+                            patch_size = 30 // gh
+                            p1_poses.append([y_c.item() * patch_size, x_c.item() * patch_size])
 
     # 6. --- Affine Invariance Test ---
     if os.path.exists(p1_ckpt):
