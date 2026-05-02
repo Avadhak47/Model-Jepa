@@ -342,3 +342,136 @@ class FactorizedVectorQuantizer(nn.Module):
         
         return int(num_dead_shapes), int(num_dead_colors)
 
+
+class StructureAwareDynamicVQ(nn.Module):
+    """
+    A Dynamic Dictionary that spawns codes on demand when novel objects appear,
+    and uses electrostatic repulsion to maintain an organized semantic topology.
+    """
+    def __init__(self, max_shape_codes=1024, max_color_codes=16, embedding_dim=128, commitment_cost=0.25, novelty_threshold=2.0, repulsion_weight=0.1):
+        super().__init__()
+        self.max_shape_codes = max_shape_codes
+        self.max_color_codes = max_color_codes
+        self.embedding_dim = embedding_dim
+        self.half_dim = embedding_dim // 2
+        self.commitment_cost = commitment_cost
+        
+        # Hyperparameters for the Dynamic Structure
+        self.novelty_threshold = novelty_threshold
+        self.repulsion_weight = repulsion_weight
+        
+        # Initialize Embeddings
+        self.embedding_shape = nn.Embedding(max_shape_codes, self.half_dim)
+        self.embedding_color = nn.Embedding(max_color_codes, self.half_dim)
+        
+        # Start with small random initialization
+        self.embedding_shape.weight.data.uniform_(-0.05, 0.05)
+        self.embedding_color.weight.data.uniform_(-0.05, 0.05)
+        
+        # Dynamic active trackers
+        self.register_buffer('active_shape_codes', torch.tensor(1, dtype=torch.long))
+        self.register_buffer('active_color_codes', torch.tensor(1, dtype=torch.long))
+        
+        # Usage trackers
+        self.register_buffer('shape_usage', torch.zeros(max_shape_codes))
+        self.register_buffer('color_usage', torch.zeros(max_color_codes))
+
+    def _quantize_dynamic(self, flat_input, embedding, max_codes, active_codes, usage_counts):
+        # Calculate distances against ACTIVE codes only
+        active_k = active_codes.item()
+        active_weights = embedding.weight[:active_k]
+        
+        distances = (torch.sum(flat_input**2, dim=1, keepdim=True) 
+                    + torch.sum(active_weights**2, dim=1)
+                    - 2 * torch.matmul(flat_input, active_weights.t()))
+                    
+        encoding_indices = torch.argmin(distances, dim=1) # [B*N]
+        min_distances = torch.min(distances, dim=1)[0]
+        
+        # Spawning Logic (only during training)
+        if self.training and active_k < max_codes:
+            novel_mask = min_distances > self.novelty_threshold
+            if novel_mask.any():
+                # Get the indices of novel items
+                novel_indices = torch.nonzero(novel_mask, as_tuple=True)[0]
+                
+                # Activate slots until we hit max_codes or run out of novel items
+                for idx in novel_indices:
+                    if active_codes.item() < max_codes:
+                        new_idx = active_codes.item()
+                        # Override the empty slot with the exact continuous latent coordinate
+                        embedding.weight.data[new_idx] = flat_input[idx].detach()
+                        active_codes.add_(1)
+                        # The item now maps to its new slot
+                        encoding_indices[idx] = new_idx
+                    else:
+                        break
+        
+        # Fetch quantized embeddings
+        quantized = embedding(encoding_indices)
+        
+        # Update usage counts
+        if self.training:
+            unique_idx, counts = torch.unique(encoding_indices, return_counts=True)
+            usage_counts[unique_idx] += counts.float()
+            
+        return quantized, encoding_indices
+        
+    def _repulsion_loss(self, embedding, active_codes):
+        active_k = active_codes.item()
+        if active_k <= 1:
+            return torch.tensor(0.0, device=embedding.weight.device)
+            
+        active_weights = embedding.weight[:active_k]
+        
+        # Pairwise L2 distances
+        dists = (torch.sum(active_weights**2, dim=1, keepdim=True) 
+                + torch.sum(active_weights**2, dim=1)
+                - 2 * torch.matmul(active_weights, active_weights.t()))
+        
+        # Add epsilon to prevent division by zero, mask diagonal
+        dists = dists + torch.eye(active_k, device=dists.device) * 1e-5
+        
+        # Electrostatic repulsion formula: F = 1 / r^2 or Energy U = 1 / r
+        # We penalize small distances to force spreading
+        repulsion = (1.0 / (dists + 1e-4)).sum() - active_k * (1.0 / 1e-4) # remove diagonal effect
+        return repulsion / (active_k * (active_k - 1))
+
+    def forward(self, inputs):
+        is_spatial = inputs.dim() == 4
+        if is_spatial:
+            inputs_perm = inputs.permute(0, 2, 3, 1).contiguous()
+        else:
+            inputs_perm = inputs.contiguous()
+            
+        flat_input = inputs_perm.view(-1, self.embedding_dim)
+        flat_shape = flat_input[:, :self.half_dim]
+        flat_color = flat_input[:, self.half_dim:]
+        
+        q_shape, s_idx = self._quantize_dynamic(
+            flat_shape, self.embedding_shape, self.max_shape_codes, self.active_shape_codes, self.shape_usage
+        )
+        q_color, c_idx = self._quantize_dynamic(
+            flat_color, self.embedding_color, self.max_color_codes, self.active_color_codes, self.color_usage
+        )
+        
+        quantized_flat = torch.cat([q_shape, q_color], dim=1)
+        
+        # Commitment Losses
+        e_latent_loss = F.mse_loss(quantized_flat.detach(), flat_input)
+        q_latent_loss = F.mse_loss(quantized_flat, flat_input.detach())
+        vq_loss = q_latent_loss + self.commitment_cost * e_latent_loss
+        
+        # Repulsion Loss
+        repulsion_s = self._repulsion_loss(self.embedding_shape, self.active_shape_codes)
+        repulsion_c = self._repulsion_loss(self.embedding_color, self.active_color_codes)
+        rep_loss = (repulsion_s + repulsion_c) * self.repulsion_weight
+        
+        quantized = quantized_flat.view(inputs_perm.shape)
+        if is_spatial:
+            quantized = quantized.permute(0, 3, 1, 2).contiguous()
+            
+        # Add gradient pass-through for quantized output
+        quantized = inputs + (quantized - inputs).detach()
+            
+        return quantized, vq_loss, rep_loss, s_idx, c_idx
