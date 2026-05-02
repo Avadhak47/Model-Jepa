@@ -48,7 +48,7 @@ def analyze_basis(library_path, n_components=1024):
                 X[i, base_idx + 11] = c / 14.0
                 
     print(f"Running Signal-Boosted NMF ({n_components} components)...")
-    nmf = NMF(n_components=n_components, init='random', solver='mu', random_state=42, max_iter=500)
+    nmf = NMF(n_components=n_components, init='random', solver='mu', random_state=42, max_iter=1000)
     W = nmf.fit_transform(X)
     H = nmf.components_
     
