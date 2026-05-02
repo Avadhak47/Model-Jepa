@@ -11,7 +11,6 @@ from tools.extract_arc_objects import PrimitiveDataset
 from modules.basis_vq import BasisVQ
 
 def apply_2d_rope(x, d_model):
-    """2D Rotary Positional Embedding for a 15x15 grid."""
     b, n, d = x.shape
     h = int(np.sqrt(n))
     device = x.device
@@ -32,22 +31,23 @@ def apply_2d_rope(x, d_model):
     return x_rot
 
 class BasisEncoder(nn.Module):
-    def __init__(self, k_slots=3, d_model=256, n_basis=1024):
+    def __init__(self, k_slots=5, d_model=256, n_basis=1024):
         super().__init__()
         self.k_slots = k_slots
         self.n_basis = n_basis
-        self.patch_proj = nn.Linear(1, d_model)
+        # Input is now 10 channels (one-hot colors)
+        self.patch_proj = nn.Linear(10, d_model)
         self.blocks = nn.ModuleList([
             nn.TransformerEncoderLayer(d_model=d_model, nhead=8, dim_feedforward=1024, batch_first=True, dropout=0.1)
-            for _ in range(6)
+            for _ in range(8)
         ])
         self.slot_queries = nn.Parameter(torch.randn(1, k_slots, d_model))
         self.slot_attn = nn.MultiheadAttention(d_model, 8, batch_first=True)
         self.basis_proj = nn.Linear(d_model, n_basis)
 
-    def forward(self, x_mask):
-        b, c, h, w = x_mask.shape
-        x = x_mask.view(b, h*w, 1)
+    def forward(self, x_onehot):
+        b, c, h, w = x_onehot.shape # [B, 10, 15, 15]
+        x = x_onehot.permute(0, 2, 3, 1).reshape(b, h*w, 10)
         x = self.patch_proj(x)
         x = apply_2d_rope(x, x.shape[-1])
         curr = x
@@ -71,17 +71,17 @@ class AlgebraicDecoder(nn.Module):
 def train():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     cfg = {
-        'k_slots': 3,
+        'k_slots': 5, # Higher capacity
         'd_model': 256,
         'n_basis': 1024,
         'batch_size': 128,
         'epochs': 1000,
-        'lr_init': 1e-4,
+        'lr_init': 2e-4, # Slightly higher LR for faster discovery
         'gain_start': 1.0,
         'gain_end': 50.0,
-        'warmup_epochs': 250,
+        'warmup_epochs': 200,
         'lambda_diversity': 0.3,
-        'lambda_shape': 5.0,
+        'lambda_shape': 10.0, # Push shape harder
         'library_path': 'arc_data/primitive_library.pt'
     }
     
@@ -108,12 +108,15 @@ def train():
         
         progress = tqdm(dataloader, desc=f"Epoch {epoch}/{cfg['epochs']}")
         for batch in progress:
-            state = batch['state'].to(device)
+            state = batch['state'].to(device) # [B, 1, 15, 15]
             mask = batch['valid_mask'].to(device)
-            x_mask = (state > 0).float()
+            
+            # CONVERT TO ONE-HOT
+            b, _, h, w = state.shape
+            x_onehot = F.one_hot(state.squeeze(1).long(), num_classes=10).permute(0, 3, 1, 2).float()
             
             optimizer.zero_grad()
-            basis_logits = encoder(x_mask)
+            basis_logits = encoder(x_onehot)
             q_manifold, indices = vq(basis_logits)
             color_logits, mask_logits = decoder(q_manifold)
             
@@ -121,7 +124,7 @@ def train():
             color_loss = F.cross_entropy(color_logits, target, reduction='none')
             color_loss = (color_loss * mask).sum() / (mask.sum() + 1e-8)
             
-            shape_target = x_mask
+            shape_target = (state > 0).float()
             shape_loss = F.binary_cross_entropy_with_logits(mask_logits, shape_target)
             
             probs = F.softmax(basis_logits.view(-1, cfg['n_basis']), dim=-1)
