@@ -165,7 +165,7 @@ class SemanticSlotEncoder(nn.Module):
         pose_init = torch.zeros(bsz, self.num_slots, self.pose_dim, device=self.device)
         return torch.cat([structural_priors, pose_init], dim=-1) # [B, K, 320]
 
-    def forward(self, inputs, temperature: float = None):
+    def forward(self, inputs, temperature: float = None, heuristic_masks=None):
         img = inputs["state"].float().to(self.device) # [B, 1, H, W]
         B, _, H, W = img.shape
 
@@ -199,12 +199,27 @@ class SemanticSlotEncoder(nn.Module):
         # and then contextualizing against input patches before refinement.
         slots = self.sample_slot_priors(B)
 
-        for _ in range(self.slot_iters):
+        # Pre-process heuristic masks if provided
+        if heuristic_masks is not None:
+            # heuristic_masks: [B, num_slots, H, W]
+            # Downsample to patch grid size (15x15)
+            hm = F.interpolate(heuristic_masks.float(), size=(self.grid_size, self.grid_size), mode='nearest')
+            hm_flat = hm.view(B, self.num_slots, -1) # [B, K, 225]
+            # Convert to log-space bias: 0 where True, -inf where False
+            # We use a strong bias (e.g., 10.0) instead of -inf to allow gradients and fallback
+            hm_bias = torch.where(hm_flat > 0.5, torch.tensor(10.0, device=self.device), torch.tensor(0.0, device=self.device))
+
+        for it in range(self.slot_iters):
             slots_prev = slots
             slots_norm = self.norm_slots(slots)
             q = self.q_proj(slots_norm)
 
             attn_logits = torch.bmm(k, q.transpose(1, 2)) * (self.full_dim ** -0.5)
+            
+            # Apply heuristic bias on the first iteration to "seed" the attention
+            if heuristic_masks is not None and it == 0:
+                attn_logits = attn_logits + hm_bias.transpose(1, 2)
+
             # Divide by temperature: high temp → soft (exploratory), low → sharp (specialised)
             attn = F.softmax(attn_logits / temp, dim=-1)
             attn_norm = attn + 1e-8

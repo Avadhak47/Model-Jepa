@@ -288,6 +288,13 @@ class SlotWorldModel(BaseWorldModel):
         
         self.state_embed = nn.Linear(self.latent_dim, self.embed_dim)
         
+        # Positional Encoding for Spatial Relations (Dynamic Adjacency/Nesting)
+        self.bbox_embed = nn.Sequential(
+            nn.Linear(4, self.embed_dim // 2),
+            nn.GELU(),
+            nn.Linear(self.embed_dim // 2, self.embed_dim)
+        )
+        
         # Spatial Attention: Objects interacting at a single time step
         self.spatial_attn_layers = nn.ModuleList([
             nn.MultiheadAttention(self.embed_dim, self.nhead, batch_first=True) for _ in range(self.num_layers)
@@ -338,6 +345,13 @@ class SlotWorldModel(BaseWorldModel):
         temporal_mask = torch.triu(torch.ones(T, T) * float('-inf'), diagonal=1).to(self.device)
         self.attention_entropies = []
         
+        # Add spatial positional encodings if bounding boxes are provided
+        if "slot_bboxes" in inputs:
+            bboxes = inputs["slot_bboxes"].to(self.device).float() # [B, T, S, 4]
+            if bboxes.dim() == 3:
+                bboxes = bboxes.unsqueeze(1)
+            x = x + self.bbox_embed(bboxes)
+        
         for i in range(self.num_layers):
             # 1. Spatial Processing (Slot vs Slot) at each timestep
             # Reshape to [B*T, S, embed_dim]
@@ -378,6 +392,41 @@ class SlotWorldModel(BaseWorldModel):
             "predicted_reward": reward,
             "attention_entropy": sum(self.attention_entropies) / len(self.attention_entropies)
         }
+        
+    @torch.no_grad()
+    def generate_plan(self, initial_latent: torch.Tensor, action: torch.Tensor, steps: int = 3, initial_bboxes: torch.Tensor = None) -> list:
+        """
+        Latent Multi-Step Planning (Chain of Thought).
+        Auto-regressively predicts intermediate latent states given an initial state and a transformation action.
+        """
+        B, S, D = initial_latent.shape
+        current_latent = initial_latent.unsqueeze(1) # [B, 1, S, D]
+        current_action = action.unsqueeze(1)         # [B, 1, action_dim]
+        current_bboxes = initial_bboxes.unsqueeze(1) if initial_bboxes is not None else None
+        
+        plan = [current_latent.squeeze(1)]
+        
+        for _ in range(steps):
+            inputs = {
+                "latent": current_latent,
+                "action": current_action
+            }
+            if current_bboxes is not None:
+                inputs["slot_bboxes"] = current_bboxes
+                
+            outputs = self.forward(inputs)
+            next_latent = outputs["next_latent"][:, -1:, :, :] # Take the prediction for the last timestep
+            
+            plan.append(next_latent.squeeze(1))
+            
+            # Auto-regressive feedback
+            current_latent = torch.cat([current_latent, next_latent], dim=1)
+            current_action = torch.cat([current_action, action.unsqueeze(1)], dim=1)
+            if current_bboxes is not None:
+                # Keep bounding boxes constant for planning or predict them if we had a bbox head
+                current_bboxes = torch.cat([current_bboxes, initial_bboxes.unsqueeze(1)], dim=1)
+                
+        return plan
         
     def loss(self, inputs: dict, outputs: dict) -> dict:
         target_z = inputs["target_latent"].to(self.device) # [B, S, latent_dim]

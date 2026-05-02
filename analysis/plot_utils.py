@@ -153,17 +153,28 @@ from matplotlib.colors import ListedColormap
 ARC_CMAP = ListedColormap(ARC_COLORS)
 
 @torch.no_grad()
-def plot_phase0_factorization(model, epoch, save_path, device='cpu'):
+def plot_phase0_factorization(model, epoch, save_path, usage_counts=None, device='cpu'):
     """
     Diagnostic plot to verify that Shape and Color are truly factorized in Phase 0.
-    Generates a matrix of 5 shapes across 5 colors.
+    Generates a matrix of Top-5 shapes across Top-5 colors based on usage.
     """
     model.eval()
     vq = model.vq
     
-    # 1. Get 5 Shape codes and 5 Color codes (avoiding BG codes 0-2)
-    s_indices = [3, 10, 20, 50, 100]
-    c_indices = [3, 7, 12, 18, 25]
+    # 1. Identify active indices (avoiding background codes 0-2)
+    if usage_counts is not None and 'shape' in usage_counts:
+        # Get top indices from usage counts
+        s_counts = usage_counts['shape'].cpu()
+        c_counts = usage_counts['color'].cpu()
+        s_indices = torch.topk(s_counts[3:], k=5).indices + 3
+        c_indices = torch.topk(c_counts[3:], k=5).indices + 3
+    else:
+        # Fallback if no counts provided
+        s_indices = [3, 10, 20, 50, 100]
+        c_indices = [3, 7, 12, 18, 25]
+    
+    s_indices = [idx.item() if torch.is_tensor(idx) else idx for idx in s_indices]
+    c_indices = [idx.item() if torch.is_tensor(idx) else idx for idx in c_indices]
     
     fig, axes = plt.subplots(len(s_indices), len(c_indices), figsize=(12, 12))
     fig.suptitle(f"Phase 0 Factorization Sweep (Shape vs Color) - Epoch {epoch}", fontsize=16)

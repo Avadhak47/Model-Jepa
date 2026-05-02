@@ -224,7 +224,7 @@ class FactorizedVectorQuantizer(nn.Module):
             self.shape_usage, flat_valid_mask, temperature=temperature,
             force_bg_mask=flat_bg_mask
         )
-        quantized_color, perp_color, _ = self._quantize(
+        quantized_color, perp_color, color_idx = self._quantize(
             flat_color, self.embedding_color, self.num_color_codes,
             self.color_usage, flat_valid_mask, temperature=temperature
         )
@@ -247,10 +247,9 @@ class FactorizedVectorQuantizer(nn.Module):
         quantized = quantized_flat.view(inputs_perm.shape)
         
         if is_spatial:
-            quantized = quantized.permute(0, 2, 3, 1  if False else 1).contiguous()
             quantized = quantized.permute(0, 3, 1, 2).contiguous()
             
-        return quantized, loss, perp_shape, perp_color, shape_idx
+        return quantized, loss, perp_shape, perp_color, quantized_flat, shape_idx, color_idx
 
     @torch.no_grad()
     def get_farthest_point_samples(self, target_slots=10):
