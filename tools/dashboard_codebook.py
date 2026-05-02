@@ -13,8 +13,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 
-from train_object_codebook import ObjectDecoder
-from modules.vq import StructureAwareDynamicVQ
+from train_object_codebook import DeepMultiSlotDecoder
+from modules.vq import SemanticEvolutionaryVQ
 
 st.set_page_config(page_title="Phase 0: Codebook Audit", layout="wide")
 
@@ -36,17 +36,18 @@ def load_models():
     cfg = checkpoint['cfg']
     
     # Initialize Models
-    decoder = ObjectDecoder(latent_dim=cfg['latent_dim'], pose_dim=cfg['pose_dim'])
+    decoder = DeepMultiSlotDecoder(k_slots=cfg['k_slots'], latent_dim=cfg['latent_dim'], pose_dim=cfg['pose_dim'])
     decoder.load_state_dict(checkpoint['decoder'])
     decoder.eval()
     
-    vq = StructureAwareDynamicVQ(
+    vq = SemanticEvolutionaryVQ(
         max_shape_codes=cfg['num_shape_codes'],
         max_color_codes=cfg['num_color_codes'],
         embedding_dim=cfg['latent_dim'],
         commitment_cost=cfg['commitment_cost'],
         novelty_threshold=cfg.get('novelty_threshold', 2.0),
-        repulsion_weight=cfg.get('repulsion_weight', 0.1)
+        repulsion_weight=cfg.get('repulsion_weight', 0.1),
+        anchor_alpha=cfg.get('anchor_alpha', 0.3)
     )
     vq.load_state_dict(checkpoint['vq'])
     vq.eval()
@@ -98,15 +99,18 @@ def main():
         color_code = vq.embedding_color.weight[color_idx].unsqueeze(0).expand(num_shapes, -1) # [1024, 64]
         
         # Combine
-        latent_vq = torch.cat([shape_codes, color_code], dim=-1) # [1024, 128]
+        # Each code is visualized by filling all K slots with the same code
+        # latent_vq will be [num_shapes, k_slots, latent_dim]
+        shape_codes_expanded = shape_codes.unsqueeze(1).expand(-1, cfg['k_slots'], -1)
+        color_code_expanded = color_code.unsqueeze(1).expand(-1, cfg['k_slots'], -1)
+        latent_vq = torch.cat([shape_codes_expanded, color_code_expanded], dim=-1)
         
         # Add zero-pose
-        pose_zero = torch.zeros(num_shapes, cfg['pose_dim'])
-        latent_combined = torch.cat([latent_vq, pose_zero], dim=-1).unsqueeze(1) # [1024, 1, 192]
+        pose_zero = torch.zeros(num_shapes, cfg['k_slots'], cfg['pose_dim'])
         
         # Decode
-        logits = decoder(latent_combined) # [1024, 10, 15, 15]
-        predictions = logits.argmax(dim=1) # [1024, 15, 15]
+        logits = decoder(latent_vq, pose_zero) # [num_shapes, 10, 15, 15]
+        predictions = logits.argmax(dim=1) # [num_shapes, 15, 15]
     
     # Pagination
     items_per_page = 36

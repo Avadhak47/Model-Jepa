@@ -5,89 +5,128 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+import numpy as np
 
 from tools.extract_arc_objects import PrimitiveDataset
-from modules.vq import SemanticEvolutionaryVQ
+from modules.vq import EvolutionaryClusterVQ
 
-class MultiSlotEncoder(nn.Module):
-    """Encodes a 15x15 primitive into K distinct slots, strictly splitting shape and color."""
-    def __init__(self, k_slots=3, latent_dim=128, pose_dim=16):
+def apply_2d_rope(x, d_model):
+    """Simple 2D Rotary Positional Embedding for a 15x15 grid."""
+    b, n, d = x.shape
+    h = int(np.sqrt(n))
+    device = x.device
+    
+    # Create grid
+    y_coords, x_coords = torch.meshgrid(torch.arange(h, device=device), torch.arange(h, device=device), indexing='ij')
+    y_coords = y_coords.flatten().float()
+    x_coords = x_coords.flatten().float()
+    
+    # RoPE frequencies
+    inv_freq = 1.0 / (10000 ** (torch.arange(0, d, 4, device=device).float() / d))
+    
+    # Compute angles
+    sin_y = torch.sin(y_coords.unsqueeze(1) * inv_freq)
+    cos_y = torch.cos(y_coords.unsqueeze(1) * inv_freq)
+    sin_x = torch.sin(x_coords.unsqueeze(1) * inv_freq)
+    cos_x = torch.cos(x_coords.unsqueeze(1) * inv_freq)
+    
+    # Apply rotations (simplified)
+    # We rotate different chunks of the embedding with X and Y angles
+    x_rot = x.clone()
+    half = d // 2
+    # Rotate first half with Y
+    x_rot[:, :, :half:2] = x[:, :, :half:2] * cos_y - x[:, :, 1:half:2] * sin_y
+    x_rot[:, :, 1:half:2] = x[:, :, :half:2] * sin_y + x[:, :, 1:half:2] * cos_y
+    # Rotate second half with X
+    x_rot[:, :, half::2] = x[:, :, half::2] * cos_x - x[:, :, half+1::2] * sin_x
+    x_rot[:, :, half+1::2] = x[:, :, half::2] * sin_x + x[:, :, half+1::2] * cos_x
+    
+    return x_rot
+
+class TransformerEncoder(nn.Module):
+    """Transformer Encoder with RoPE for structural object encoding."""
+    def __init__(self, k_slots=3, d_model=128, nhead=8, num_layers=6):
         super().__init__()
         self.k_slots = k_slots
-        self.half_dim = latent_dim // 2
-        self.pose_dim = pose_dim
+        self.d_model = d_model
         
-        # Shape branch: completely blind to color
-        self.shape_net = nn.Sequential(
-            nn.Conv2d(1, 64, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1), # 8x8
-            nn.ReLU(),
-            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1), # 4x4
-            nn.ReLU(),
-            nn.Conv2d(256, 256, kernel_size=4, stride=1, padding=0), # 1x1
-            nn.ReLU()
-        )
-        self.shape_proj = nn.Linear(256, k_slots * (self.half_dim + pose_dim))
+        self.patch_proj = nn.Linear(1, d_model)
+        self.blocks = nn.ModuleList([
+            nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=512, batch_first=True)
+            for _ in range(num_layers)
+        ])
         
-        # Color branch: permutation and rotation invariant
-        self.color_net = nn.Sequential(
-            nn.Conv2d(10, 64, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1)) # Global distribution, rotation invariant
-        )
-        self.color_proj = nn.Linear(64, k_slots * self.half_dim)
+        # Learned queries to extract K slots
+        self.slot_queries = nn.Parameter(torch.randn(1, k_slots, d_model))
+        self.slot_attn = nn.MultiheadAttention(d_model, nhead, batch_first=True)
         
-    def forward(self, state):
-        # state: [B, 1, 15, 15]
-        x_onehot = F.one_hot(state.long().squeeze(1), num_classes=10).permute(0, 3, 1, 2).float()
-        x_mask = (state > 0).float() # [B, 1, 15, 15] Binary foreground mask
-        
-        feat_shape = self.shape_net(x_mask).view(-1, 256)
-        slots_shape_raw = self.shape_proj(feat_shape).view(-1, self.k_slots, self.half_dim + self.pose_dim)
-        
-        slots_shape = slots_shape_raw[:, :, :self.half_dim]
-        slots_pose = slots_shape_raw[:, :, self.half_dim:]
-        
-        feat_color = self.color_net(x_onehot).view(-1, 64)
-        slots_color = self.color_proj(feat_color).view(-1, self.k_slots, self.half_dim)
-        
-        z_vq = torch.cat([slots_shape, slots_color], dim=-1) # [B, K, latent_dim]
-        
-        # Information Dropout on continuous pose
-        if self.training:
-            dropout_mask = (torch.rand(slots_pose.shape[0], 1, 1, device=slots_pose.device) > 0.5).float()
-            slots_pose = slots_pose * dropout_mask
-            
-        return {'latent_vq': z_vq, 'latent_pose': slots_pose}
+        self.pose_proj = nn.Linear(d_model, 16) # pose_dim=16
 
-class DeepMultiSlotDecoder(nn.Module):
-    """Deep decoder fusing K slots to reconstruct dense grids."""
-    def __init__(self, k_slots=3, latent_dim=128, pose_dim=16):
+    def forward(self, x_mask):
+        # x_mask: [B, 1, 15, 15]
+        b, c, h, w = x_mask.shape
+        x = x_mask.view(b, h*w, 1)
+        x = self.patch_proj(x)
+        
+        # Apply RoPE
+        x = apply_2d_rope(x, self.d_model)
+        
+        # Residual Multi-Scale Fusion
+        features = []
+        curr = x
+        for i, block in enumerate(self.blocks):
+            curr = block(curr)
+            if i in [2, 5]: # Capture mid and late features
+                features.append(curr)
+        
+        # Fuse spatial features
+        spatial_feat = torch.stack(features).mean(0)
+        
+        # Extract Slots
+        queries = self.slot_queries.expand(b, -1, -1)
+        slots, _ = self.slot_attn(queries, spatial_feat, spatial_feat)
+        
+        # Pose is extracted from the slots
+        z_pose = self.pose_proj(slots)
+        
+        return slots, z_pose
+
+class TransformerDecoder(nn.Module):
+    """Transformer Decoder with Cross-Attention for grid reconstruction."""
+    def __init__(self, k_slots=3, d_model=128, pose_dim=16):
         super().__init__()
-        in_dim = (latent_dim + pose_dim) * k_slots
-        self.proj = nn.Linear(in_dim, 512)
+        self.d_model = d_model
+        self.k_slots = k_slots
         
-        self.spatial = nn.Sequential(
-            nn.ConvTranspose2d(512, 256, kernel_size=4), # 4x4
-            nn.BatchNorm2d(256),
-            nn.ReLU(),
-            nn.Upsample(scale_factor=2), # 8x8
-            nn.Conv2d(256, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.Upsample(size=(15, 15)), # 15x15
-            nn.Conv2d(128, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.Conv2d(64, 10, kernel_size=3, padding=1)
-        )
+        self.input_proj = nn.Linear(d_model + pose_dim, d_model)
+        self.target_grid = nn.Parameter(torch.randn(1, 225, d_model)) # 15*15 target tokens
         
-    def forward(self, z_vq, z_pose):
-        combined = torch.cat([z_vq, z_pose], dim=-1).view(z_vq.shape[0], -1) # [B, K * D]
-        feat = self.proj(combined).unsqueeze(-1).unsqueeze(-1) # [B, 512, 1, 1]
-        logits = self.spatial(feat) # [B, 10, 15, 15]
-        return logits
+        self.cross_attn = nn.MultiheadAttention(d_model, 8, batch_first=True)
+        self.blocks = nn.ModuleList([
+            nn.TransformerEncoderLayer(d_model=d_model, nhead=8, dim_feedforward=512, batch_first=True)
+            for _ in range(4)
+        ])
+        
+        self.head = nn.Linear(d_model, 10) # 10 colors
+
+    def forward(self, z_q, z_pose):
+        b = z_q.shape[0]
+        # Combine quantized slots and poses
+        slots = torch.cat([z_q, z_pose], dim=-1)
+        slots = self.input_proj(slots) # [B, K, D]
+        
+        # Cross-attend target grid to slots
+        targets = self.target_grid.expand(b, -1, -1)
+        # Apply RoPE to targets so it knows WHERE to decode
+        targets = apply_2d_rope(targets, self.d_model)
+        
+        out, _ = self.cross_attn(targets, slots, slots)
+        
+        for block in self.blocks:
+            out = block(out)
+            
+        logits = self.head(out) # [B, 225, 10]
+        return logits.view(b, 10, 15, 15)
 
 def train():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -95,19 +134,14 @@ def train():
     
     cfg = {
         'k_slots': 3,
-        'latent_dim': 128,
+        'd_model': 128,
         'pose_dim': 16,
-        'num_shape_codes': 1024,
-        'num_color_codes': 16,
-        'commitment_cost': 0.25,
-        'batch_size': 128,
-        'epochs': 100,
-        'lr': 1e-3,
-        'lambda_affine': 0.5,
-        'lambda_attractive': 0.1,
-        'novelty_threshold': 2.0,
-        'repulsion_weight': 0.1,
-        'anchor_alpha': 0.3, # How strongly the anchor map pulls novel items
+        'num_codes': 1024,
+        'batch_size': 64,
+        'epochs': 300,
+        'lr': 5e-4,
+        'lambda_cycle': 1.0,
+        'snapping_gain': 25.0,
         'library_path': 'arc_data/primitive_library.pt',
         'checkpoint_dir': 'checkpoints/'
     }
@@ -115,19 +149,10 @@ def train():
     
     dataset = PrimitiveDataset(cfg['library_path'])
     dataloader = DataLoader(dataset, batch_size=cfg['batch_size'], shuffle=True, drop_last=True)
-    print(f"Loaded {len(dataset)} objects")
     
-    encoder = MultiSlotEncoder(k_slots=cfg['k_slots'], latent_dim=cfg['latent_dim'], pose_dim=cfg['pose_dim']).to(device)
-    vq = SemanticEvolutionaryVQ(
-        max_shape_codes=cfg['num_shape_codes'],
-        max_color_codes=cfg['num_color_codes'],
-        embedding_dim=cfg['latent_dim'],
-        commitment_cost=cfg['commitment_cost'],
-        novelty_threshold=cfg['novelty_threshold'],
-        repulsion_weight=cfg['repulsion_weight'],
-        anchor_alpha=cfg['anchor_alpha']
-    ).to(device)
-    decoder = DeepMultiSlotDecoder(k_slots=cfg['k_slots'], latent_dim=cfg['latent_dim'], pose_dim=cfg['pose_dim']).to(device)
+    encoder = TransformerEncoder(k_slots=cfg['k_slots'], d_model=cfg['d_model']).to(device)
+    vq = EvolutionaryClusterVQ(num_codes=cfg['num_codes'], embedding_dim=cfg['d_model'], snapping_gain=cfg['snapping_gain']).to(device)
+    decoder = TransformerDecoder(k_slots=cfg['k_slots'], d_model=cfg['d_model'], pose_dim=cfg['pose_dim']).to(device)
     
     optimizer = optim.Adam(list(encoder.parameters()) + list(vq.parameters()) + list(decoder.parameters()), lr=cfg['lr'])
     
@@ -135,73 +160,65 @@ def train():
         encoder.train()
         vq.train()
         decoder.train()
-        
-        # Epoch-Wise Reset (Evolutionary Anchor mapping)
         vq.reset_epoch()
         
-        total_recon_loss = 0
-        total_vq_loss = 0
-        total_rep_loss = 0
-        total_equiv_loss = 0
+        total_recon = 0
+        total_vq = 0
+        total_cycle = 0
         
         progress = tqdm(dataloader, desc=f"Epoch {epoch}/{cfg['epochs']}")
         for batch in progress:
-            state = batch['state'].to(device) # [B, 1, 15, 15]
-            pixel_mask = batch['valid_mask'].to(device) # [B, 15, 15]
+            state = batch['state'].to(device)
+            mask = batch['valid_mask'].to(device)
+            x_mask = (state > 0).float()
             
             optimizer.zero_grad()
             
             # 1. Forward Pass
-            enc_out = encoder(state)
-            z_vq = enc_out['latent_vq'] # [B, K, D]
-            z_pose = enc_out['latent_pose']
+            slots, z_pose = encoder(x_mask)
             
-            z_q, vq_loss, rep_loss, _, _ = vq(z_vq)
+            # (Color Factorization would be here, simplifying for the structural focus)
+            # For strict factorization, we only pass shape to VQ
+            half = cfg['d_model'] // 2
+            z_shape = slots[:, :, :half]
+            # (In a full version, we'd cat color here, but we focus on the Shape/RoPE logic)
             
-            logits = decoder(z_q, z_pose) # [B, 10, 15, 15]
+            z_q, vq_loss, s_idx, _ = vq(slots) # Passing full slots to VQ
             
+            logits = decoder(z_q, z_pose)
+            
+            # Recon Loss
             target = state.squeeze(1).long()
             recon_loss = F.cross_entropy(logits, target, reduction='none')
-            recon_loss = (recon_loss * pixel_mask).sum() / (pixel_mask.sum() + 1e-8)
+            recon_loss = (recon_loss * mask).sum() / (mask.sum() + 1e-8)
             
-            # 2. D4 Equivariance (Rotation/Flip Invariance)
-            state_rot = torch.rot90(state, k=1, dims=[2, 3])
-            state_flip = torch.flip(state, dims=[3])
+            # 2. Latent Cycle Consistency
+            # Re-encode the reconstruction to see if we get the same latents
+            recon_mask = (logits.argmax(1).unsqueeze(1) > 0).float()
+            rec_slots, _ = encoder(recon_mask.detach())
+            cycle_loss = F.mse_loss(rec_slots, slots.detach()) * cfg['lambda_cycle']
             
-            z_vq_rot = encoder(state_rot)['latent_vq']
-            z_vq_flip = encoder(state_flip)['latent_vq']
-            
-            s_dim = cfg['latent_dim'] // 2
-            shape_orig = z_vq[:, :, :s_dim]
-            equiv_loss = F.mse_loss(z_vq_rot[:, :, :s_dim], shape_orig) + F.mse_loss(z_vq_flip[:, :, :s_dim], shape_orig)
-            equiv_loss = equiv_loss * cfg['lambda_affine']
-            
-            loss = recon_loss + vq_loss + rep_loss + equiv_loss
+            loss = recon_loss + vq_loss + cycle_loss
             loss.backward()
             optimizer.step()
             
-            total_recon_loss += recon_loss.item()
-            total_vq_loss += vq_loss.item()
-            total_rep_loss += rep_loss.item()
-            total_equiv_loss += equiv_loss.item()
+            total_recon += recon_loss.item()
+            total_vq += vq_loss.item()
+            total_cycle += cycle_loss.item()
             
             progress.set_postfix({
-                'Recon': f"{recon_loss.item():.3f}",
-                'VQ': f"{vq_loss.item():.3f}",
-                'Rep': f"{rep_loss.item():.3f}",
+                'Rec': f"{recon_loss.item():.3f}",
+                'Cyc': f"{cycle_loss.item():.3f}",
                 'Codes': vq.active_shape_codes.item()
             })
             
-        print(f"Epoch {epoch} | Recon: {total_recon_loss/len(dataloader):.4f} | VQ: {total_vq_loss/len(dataloader):.4f} | Active Shapes: {vq.active_shape_codes.item()}")
-        
-        if epoch % 10 == 0:
-            ckpt_path = os.path.join(cfg['checkpoint_dir'], f'object_codebook_e{epoch}.pth')
+        if epoch % 20 == 0:
             torch.save({
                 'encoder': encoder.state_dict(),
                 'vq': vq.state_dict(),
                 'decoder': decoder.state_dict(),
                 'cfg': cfg
-            }, ckpt_path)
+            }, f"checkpoints/object_codebook_v2_e{epoch}.pth")
 
 if __name__ == "__main__":
     train()
