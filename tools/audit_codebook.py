@@ -40,8 +40,8 @@ cmap = ListedColormap(ARC_COLORS)
 
 def reconstruct_from_atoms(obj_flat, atoms, k):
     """
-    obj_flat: [2700]  — flattened object (one-hot color × 15 × 15 × 12? no — raw pixel grid)
-    atoms:    [1024, 2700]  — NMF basis
+    obj_flat: [2250]  — flattened object (15×15×10 one-hot color)
+    atoms:    [1024, 2250]  — NMF basis (same encoding)
     k:        int  — number of atoms to use
 
     Returns:
@@ -60,10 +60,9 @@ def reconstruct_from_atoms(obj_flat, atoms, k):
     weights = 1.0 / (best_dists + 1e-8)
     weights = weights / weights.sum()
 
-    recon = (atoms[best_k] * weights.unsqueeze(1)).sum(dim=0)    # [2700]
-    recon_3d = recon.view(15, 15, 12)
-    # Color logits from first 10 channels per pixel
-    color_logits = recon_3d[:, :, :10]   # [15, 15, 10]
+    recon = (atoms[best_k] * weights.unsqueeze(1)).sum(dim=0)    # [2250]
+    # Atoms are [2250] = 15×15×10 one-hot color
+    color_logits = recon.view(15, 15, 10)   # [15, 15, 10]
     recon_grid   = color_logits.argmax(dim=-1)   # [15, 15]
 
     return recon_grid, best_k, weights
@@ -95,16 +94,12 @@ def audit_codebook(k=5, n_visualize=8, library_path='arc_data/primitive_library.
         item  = dataset[i]
         state = item['state'].squeeze(0).long()   # [15, 15] int grid
 
-        # Convert to one-hot [15, 15, 10] then flatten to [2700]... but NMF was
-        # trained on a different representation. Use raw pixel values × color as
-        # proxy: one-hot color [10] + 2-channel position mask [2] = 12 channels
-        # Replicate what analyze_arc_basis.py did
-        oh   = F.one_hot(state, num_classes=10).float()          # [15, 15, 10]
-        mask = (state > 0).float().unsqueeze(-1)                  # [15, 15, 1]
-        # 2-channel shape: binary mask + normalized intensity
-        pos  = torch.cat([mask, mask * state.float().unsqueeze(-1) / 9.0], dim=-1)
-        obj_12ch = torch.cat([oh, pos], dim=-1)                   # [15, 15, 12]
-        obj_flat = obj_12ch.view(-1).to(device)                   # [2700]
+        # Match the encoding in analyze_arc_basis.py v2:
+        # 10-channel one-hot color only, no position channels → 2250 dims
+        oh       = F.one_hot(state, num_classes=10).float()   # [15, 15, 10]
+        obj_flat = oh.view(-1).to(device)                     # [2250]
+        # L1 normalize to match NMF training
+        obj_flat = obj_flat / (obj_flat.sum() + 1e-8)
 
         recon_grid, best_k, _ = reconstruct_from_atoms(obj_flat, atoms, k)
 
@@ -186,12 +181,11 @@ def audit_codebook(k=5, n_visualize=8, library_path='arc_data/primitive_library.
     for test_k in [1, 2, 3, 5, 8, 10, 20]:
         sample_accs = []
         for i in range(0, min(500, len(dataset)), 1):
-            item   = dataset[i]
-            state  = item['state'].squeeze(0).long()
-            oh     = F.one_hot(state, num_classes=10).float()
-            mask   = (state > 0).float().unsqueeze(-1)
-            pos    = torch.cat([mask, mask * state.float().unsqueeze(-1) / 9.0], dim=-1)
-            obj_flat = torch.cat([oh, pos], dim=-1).view(-1).to(device)
+            item     = dataset[i]
+            state    = item['state'].squeeze(0).long()
+            oh       = F.one_hot(state, num_classes=10).float()
+            obj_flat = oh.view(-1).to(device)
+            obj_flat = obj_flat / (obj_flat.sum() + 1e-8)
             recon_g, _, _ = reconstruct_from_atoms(obj_flat, atoms, test_k)
             sample_accs.append((recon_g.cpu() == state).float().mean().item() * 100)
         print(f"  K={test_k:2d} → {np.mean(sample_accs):.1f}% mean acc  (sample of {len(sample_accs)})")
