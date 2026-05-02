@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 
 from train_object_codebook import ObjectDecoder
-from modules.vq import FactorizedVectorQuantizer
+from modules.vq import StructureAwareDynamicVQ
 
 st.set_page_config(page_title="Phase 0: Codebook Audit", layout="wide")
 
@@ -40,11 +40,13 @@ def load_models():
     decoder.load_state_dict(checkpoint['decoder'])
     decoder.eval()
     
-    vq = FactorizedVectorQuantizer(
-        num_shape_codes=cfg['num_shape_codes'],
-        num_color_codes=cfg['num_color_codes'],
+    vq = StructureAwareDynamicVQ(
+        max_shape_codes=cfg['num_shape_codes'],
+        max_color_codes=cfg['num_color_codes'],
         embedding_dim=cfg['latent_dim'],
-        commitment_cost=cfg['commitment_cost']
+        commitment_cost=cfg['commitment_cost'],
+        novelty_threshold=cfg.get('novelty_threshold', 2.0),
+        repulsion_weight=cfg.get('repulsion_weight', 0.1)
     )
     vq.load_state_dict(checkpoint['vq'])
     vq.eval()
@@ -121,6 +123,7 @@ def main():
             grid = predictions[i].numpy()
             fig = plot_object(grid, title=f"Code #{i}")
             st.pyplot(fig)
+            plt.close(fig)
 
 if __name__ == "__main__":
     main()

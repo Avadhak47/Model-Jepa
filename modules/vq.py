@@ -475,3 +475,149 @@ class StructureAwareDynamicVQ(nn.Module):
         quantized = inputs + (quantized - inputs).detach()
             
         return quantized, vq_loss, rep_loss, s_idx, c_idx
+
+class SemanticEvolutionaryVQ(nn.Module):
+    """
+    An Evolutionary Dynamic Dictionary that resets at the beginning of each epoch,
+    using the previous epoch's codes as a Semantic Anchor Map to guide the generation
+    of new codes for robust structural alignment.
+    """
+    def __init__(self, max_shape_codes=1024, max_color_codes=16, embedding_dim=128, commitment_cost=0.25, novelty_threshold=2.0, repulsion_weight=0.1, anchor_alpha=0.3):
+        super().__init__()
+        self.max_shape_codes = max_shape_codes
+        self.max_color_codes = max_color_codes
+        self.embedding_dim = embedding_dim
+        self.half_dim = embedding_dim // 2
+        self.commitment_cost = commitment_cost
+        
+        # Hyperparameters for the Dynamic Structure
+        self.novelty_threshold = novelty_threshold
+        self.repulsion_weight = repulsion_weight
+        self.anchor_alpha = anchor_alpha
+        
+        # Initialize Embeddings
+        self.embedding_shape = nn.Embedding(max_shape_codes, self.half_dim)
+        self.embedding_color = nn.Embedding(max_color_codes, self.half_dim)
+        
+        self.embedding_shape.weight.data.uniform_(-0.05, 0.05)
+        self.embedding_color.weight.data.uniform_(-0.05, 0.05)
+        
+        # Semantic Anchor Maps (Previous Epoch's Codebook)
+        self.register_buffer('anchor_shape', torch.zeros_like(self.embedding_shape.weight))
+        self.register_buffer('anchor_color', torch.zeros_like(self.embedding_color.weight))
+        self.register_buffer('anchor_shape_count', torch.tensor(0, dtype=torch.long))
+        self.register_buffer('anchor_color_count', torch.tensor(0, dtype=torch.long))
+        
+        # Dynamic active trackers
+        self.register_buffer('active_shape_codes', torch.tensor(1, dtype=torch.long))
+        self.register_buffer('active_color_codes', torch.tensor(1, dtype=torch.long))
+        
+        # Usage trackers
+        self.register_buffer('shape_usage', torch.zeros(max_shape_codes))
+        self.register_buffer('color_usage', torch.zeros(max_color_codes))
+
+    def reset_epoch(self):
+        """Called at the start of an epoch to convert current codes into the Anchor Map and clear active slots."""
+        if self.active_shape_codes.item() > 1:
+            self.anchor_shape.data[:self.active_shape_codes] = self.embedding_shape.weight.data[:self.active_shape_codes].clone()
+            self.anchor_shape_count.copy_(self.active_shape_codes)
+        
+        if self.active_color_codes.item() > 1:
+            self.anchor_color.data[:self.active_color_codes] = self.embedding_color.weight.data[:self.active_color_codes].clone()
+            self.anchor_color_count.copy_(self.active_color_codes)
+            
+        self.active_shape_codes.fill_(1)
+        self.active_color_codes.fill_(1)
+        self.shape_usage.zero_()
+        self.color_usage.zero_()
+
+    def _quantize_dynamic(self, flat_input, embedding, max_codes, active_codes, usage_counts, anchor_map, anchor_count):
+        active_k = active_codes.item()
+        active_weights = embedding.weight[:active_k]
+        
+        distances = (torch.sum(flat_input**2, dim=1, keepdim=True) 
+                    + torch.sum(active_weights**2, dim=1)
+                    - 2 * torch.matmul(flat_input, active_weights.t()))
+                    
+        encoding_indices = torch.argmin(distances, dim=1) # [B*N]
+        min_distances = torch.min(distances, dim=1)[0]
+        
+        # Evolutionary Spawning Logic
+        if self.training and active_k < max_codes:
+            novel_mask = min_distances > self.novelty_threshold
+            if novel_mask.any():
+                novel_indices = torch.nonzero(novel_mask, as_tuple=True)[0]
+                
+                for idx in novel_indices:
+                    if active_codes.item() < max_codes:
+                        new_idx = active_codes.item()
+                        latent_obj = flat_input[idx].detach()
+                        
+                        # Apply Anchor Map Influence if available
+                        if anchor_count.item() > 0:
+                            # Find nearest anchor to this latent
+                            anchors = anchor_map[:anchor_count.item()]
+                            anchor_dists = torch.sum((latent_obj.unsqueeze(0) - anchors)**2, dim=1)
+                            nearest_anchor = anchors[torch.argmin(anchor_dists)]
+                            
+                            # Interpolate: mostly latent_obj, but gravitationally pulled by the nearest anchor
+                            spawned_code = (1.0 - self.anchor_alpha) * latent_obj + self.anchor_alpha * nearest_anchor
+                        else:
+                            spawned_code = latent_obj
+                            
+                        # Override the empty slot
+                        embedding.weight.data[new_idx] = spawned_code
+                        active_codes.add_(1)
+                        encoding_indices[idx] = new_idx
+                    else:
+                        break
+        
+        quantized = embedding(encoding_indices)
+        
+        if self.training:
+            unique_idx, counts = torch.unique(encoding_indices, return_counts=True)
+            usage_counts[unique_idx] += counts.float()
+            
+        return quantized, encoding_indices
+        
+    def _repulsion_loss(self, embedding, active_codes):
+        active_k = active_codes.item()
+        if active_k <= 1:
+            return torch.tensor(0.0, device=embedding.weight.device)
+            
+        active_weights = embedding.weight[:active_k]
+        dists = (torch.sum(active_weights**2, dim=1, keepdim=True) 
+                + torch.sum(active_weights**2, dim=1)
+                - 2 * torch.matmul(active_weights, active_weights.t()))
+        dists = dists + torch.eye(active_k, device=dists.device) * 1e-5
+        repulsion = (1.0 / (dists + 1e-4)).sum() - active_k * (1.0 / 1e-4)
+        return repulsion / (active_k * (active_k - 1))
+
+    def forward(self, inputs):
+        # inputs: [B, K, D] where K is number of slots
+        b, k, d = inputs.shape
+        flat_input = inputs.view(-1, self.embedding_dim)
+        
+        flat_shape = flat_input[:, :self.half_dim]
+        flat_color = flat_input[:, self.half_dim:]
+        
+        q_shape, s_idx = self._quantize_dynamic(
+            flat_shape, self.embedding_shape, self.max_shape_codes, self.active_shape_codes, self.shape_usage, self.anchor_shape, self.anchor_shape_count
+        )
+        q_color, c_idx = self._quantize_dynamic(
+            flat_color, self.embedding_color, self.max_color_codes, self.active_color_codes, self.color_usage, self.anchor_color, self.anchor_color_count
+        )
+        
+        quantized_flat = torch.cat([q_shape, q_color], dim=1)
+        
+        e_latent_loss = F.mse_loss(quantized_flat.detach(), flat_input)
+        q_latent_loss = F.mse_loss(quantized_flat, flat_input.detach())
+        vq_loss = q_latent_loss + self.commitment_cost * e_latent_loss
+        
+        rep_loss = (self._repulsion_loss(self.embedding_shape, self.active_shape_codes) + 
+                    self._repulsion_loss(self.embedding_color, self.active_color_codes)) * self.repulsion_weight
+        
+        quantized = quantized_flat.view(b, k, d)
+        quantized = inputs + (quantized - inputs).detach()
+            
+        return quantized, vq_loss, rep_loss, s_idx.view(b, k), c_idx.view(b, k)
