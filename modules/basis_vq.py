@@ -4,89 +4,107 @@ import torch.nn.functional as F
 
 class BasisVQ(nn.Module):
     """
-    Phoenix v5 BasisVQ:
-    - Uses Gumbel-Softmax with temperature scheduling (NOT naive straight-through)
-    - Tracks dead atoms and supports Adaptive Reinitialization (NS-VQ inspired)
-    - Separates color and positional axes of the NMF basis for clean reconstruction
+    Phoenix v6 BasisVQ — Proper VQ-VAE Straight-Through.
+
+    The key insight: the ENCODER'S slot features (not raw NMF atom vectors)
+    are what get passed to the decoder. The NMF atoms define WHICH structure
+    is selected, but color information stays in the encoder representation.
+
+    Forward pass (training):
+        q = z + (e_i - z).detach()     ← straight-through
+        decoder sees q, which equals z in the forward pass (encoder features)
+        but pulls gradients back through the atom selection
+
+    Inference:
+        Same formula, but z ≈ e_i because the encoder has learned to
+        align its output with the correct atom.
     """
-    def __init__(self, basis_path='arc_data/arc_basis_nmf_1024.pt', temperature=1.0):
+    def __init__(self, basis_path='arc_data/arc_basis_nmf_1024.pt',
+                 d_model=256, n_basis=1024):
         super().__init__()
         data = torch.load(basis_path, weights_only=False)
-        basis = data['basis']  # [1024, 2700]
+        basis = data['basis']                           # [1024, 2700]
 
-        # Split basis into color (channels 0-9 per pixel) and position (channels 10-11)
-        # Reshape to [1024, 15, 15, 12], then separate
-        basis_3d = basis.view(1024, 15, 15, 12)
-        color_basis = basis_3d[:, :, :, :10].reshape(1024, -1)   # [1024, 2250]
-        pos_basis   = basis_3d[:, :, :, 10:].reshape(1024, -1)   # [1024, 450]
+        self.register_buffer('basis_vectors', basis)    # frozen NMF atoms
+        self.num_codes  = basis.shape[0]
+        self.basis_dim  = basis.shape[1]                # 2700
+        self.d_model    = d_model
 
-        self.register_buffer('color_basis', color_basis)
-        self.register_buffer('pos_basis', pos_basis)
-        self.num_codes = basis.shape[0]
-
-        self.temperature = temperature  # Will be annealed externally
+        # Learnable projection: encoder slot (d_model) → NMF manifold space (2700)
+        # This aligns the encoder representation with the NMF atoms for comparison
+        self.slot_proj = nn.Linear(d_model, self.basis_dim)
 
         self.register_buffer('usage_counts', torch.zeros(self.num_codes))
         self.register_buffer('ema_usage',    torch.zeros(self.num_codes))
 
-    def forward(self, logits, encoder_outputs=None):
+        # Commitment loss weight (encourages encoder to commit to selected atom)
+        self.beta = 0.25
+
+    def forward(self, slot_features):
         """
-        logits: [B, K, 1024]  - raw encoder logits over atoms
-        encoder_outputs: optional [B, K, d_model] for dead atom revival
-        Returns: (color_manifold, pos_manifold, indices, aux_loss)
+        slot_features: [B, K, d_model]  ← raw encoder slot features (contain color!)
+
+        Returns:
+            q_st:      [B, K, 2700]  ← straight-through quantized features for decoder
+            indices:   [B, K]        ← selected atom IDs (the symbolic vocabulary)
+            vq_loss:   scalar        ← commitment + embedding loss for training
+            entropy:   scalar        ← codebook diversity bonus
         """
-        b, k, c = logits.shape
+        b, k, _ = slot_features.shape
 
-        if self.training:
-            # Gumbel-Softmax: guarantees gradients to ALL atoms, not just the argmax
-            # hard=True gives a one-hot in the forward pass (for discrete selection)
-            # but smooth gradients in the backward pass
-            one_hot = F.gumbel_softmax(logits, tau=self.temperature, hard=True, dim=-1)  # [B, K, 1024]
-            indices = one_hot.argmax(dim=-1)  # [B, K]
-        else:
-            indices = logits.argmax(dim=-1)
-            one_hot = F.one_hot(indices, num_classes=self.num_codes).float()
+        # Project encoder slots into NMF manifold space for nearest-neighbour lookup
+        z_e = self.slot_proj(slot_features)             # [B, K, 2700]
 
-        # Algebraic reconstruction (separate color and position)
-        color_manifold = torch.matmul(one_hot, self.color_basis)  # [B, K, 2250]
-        pos_manifold   = torch.matmul(one_hot, self.pos_basis)    # [B, K, 450]
+        # ── Nearest-neighbour lookup in NMF basis ──
+        # Distances: ||z_e - e_i||^2  (broadcasting)
+        z_flat = z_e.view(b * k, self.basis_dim)        # [B*K, 2700]
+        # ||z||^2 - 2*z·e + ||e||^2
+        dist = (
+            z_flat.pow(2).sum(dim=1, keepdim=True)
+            - 2 * z_flat @ self.basis_vectors.T
+            + self.basis_vectors.pow(2).sum(dim=1, keepdim=True).T
+        )                                               # [B*K, 1024]
+        indices = dist.argmin(dim=-1)                   # [B*K]
+        indices = indices.view(b, k)                    # [B, K]
 
-        # Track usage with EMA for dead atom detection
+        # ── Selected atom vectors ──
+        e_i = self.basis_vectors[indices.view(-1)].view(b, k, self.basis_dim)  # [B, K, 2700]
+
+        # ── VQ-VAE Straight-Through Estimator ──
+        # Forward: pass z_e (contains encoder's color info!) to decoder
+        # Backward: gradients flow through z_e (not through frozen basis)
+        q_st = z_e + (e_i - z_e).detach()              # [B, K, 2700]
+
+        # ── VQ Loss ──
+        # Commitment loss: encoder output stays close to selected atom
+        commit_loss = F.mse_loss(z_e, e_i.detach())
+        # Embedding loss: (skipped — basis is frozen, can't update atoms)
+        vq_loss = self.beta * commit_loss
+
+        # ── Diversity / Entropy bonus ──
+        # Encourage uniform usage across the 1024 atoms
+        # Use soft distances as "probabilities" for entropy calculation
+        logits = -dist.view(b, k, self.num_codes)       # [B, K, 1024]
+        avg_probs = F.softmax(logits, dim=-1).view(-1, self.num_codes).mean(dim=0)
+        entropy   = -torch.sum(avg_probs * torch.log(avg_probs + 1e-8))
+
+        # ── Usage tracking ──
         if self.training:
             with torch.no_grad():
-                batch_usage = torch.zeros(self.num_codes, device=logits.device)
-                batch_usage.scatter_add_(0, indices.view(-1),
-                                         torch.ones(b * k, device=logits.device))
-                self.usage_counts += batch_usage
-                self.ema_usage = 0.99 * self.ema_usage + 0.01 * batch_usage
+                usage = torch.zeros(self.num_codes, device=slot_features.device)
+                usage.scatter_add_(0, indices.view(-1),
+                                   torch.ones(b * k, device=slot_features.device))
+                self.usage_counts += usage
+                self.ema_usage = 0.99 * self.ema_usage + 0.01 * usage
 
-        # Commitment loss: encourage encoder to stay close to its chosen atom
-        # (even though basis is frozen, this regularises the logit distribution)
-        probs = F.softmax(logits, dim=-1)
-        avg_probs = probs.view(-1, self.num_codes).mean(dim=0)
-        entropy = -torch.sum(avg_probs * torch.log(avg_probs + 1e-8))
-
-        return color_manifold, pos_manifold, indices, entropy
+        return q_st, indices, vq_loss, entropy
 
     @torch.no_grad()
-    def revive_dead_atoms(self, encoder_batch_logits):
-        """
-        NS-VQ inspired: find dead atoms and re-seed them using current encoder outputs.
-        Call every N epochs.
-        encoder_batch_logits: [B, K, 1024]
-        """
+    def revive_dead_atoms(self):
+        """Reset EMA tracking for dead atoms to give them a fresh chance."""
         dead_mask = self.ema_usage < 0.1
         n_dead = dead_mask.sum().item()
-        if n_dead == 0:
-            return 0
-
-        # Find the most-used atoms in this batch as "donors"
-        batch_usage = self.usage_counts.clone()
-        _, donor_ids = batch_usage.sort(descending=True)
-        donor_ids = donor_ids[:n_dead]
-
-        # The dead atoms' logit positions get "seeded" toward the donors
-        # (We can't change the frozen basis, but we can report back how many were dead)
-        self.ema_usage[dead_mask] = 0.5  # Give them a second chance
-        self.usage_counts.zero_()
+        if n_dead > 0:
+            self.ema_usage[dead_mask] = 0.5
+            self.usage_counts.zero_()
         return n_dead

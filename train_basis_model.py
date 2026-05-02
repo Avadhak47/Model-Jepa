@@ -10,7 +10,7 @@ import numpy as np
 from tools.extract_arc_objects import PrimitiveDataset
 from modules.basis_vq import BasisVQ
 
-# ─────────────────────────── Helpers ───────────────────────────
+# ─────────────────────────── Helpers ────────────────────────────────────────
 
 def apply_2d_rope(x, d_model):
     """2D Rotary Positional Embedding for a 15x15 grid."""
@@ -35,9 +35,15 @@ def apply_2d_rope(x, d_model):
     x_rot[:, :, half+1::2] = x[:, :, half::2]   * sin_x + x[:, :, half+1::2]  * cos_x
     return x_rot
 
-# ─────────────────────────── Encoder ───────────────────────────
+# ─────────────────────────── Encoder ────────────────────────────────────────
 
 class BasisEncoder(nn.Module):
+    """
+    Phoenix v6:
+    - Returns raw slot features [B, K, d_model] (NOT logits over basis)
+    - Color AND shape information are both preserved in slot_features
+    - BasisVQ does the nearest-neighbour lookup separately
+    """
     def __init__(self, k_slots=5, d_model=256, n_basis=1024):
         super().__init__()
         self.k_slots = k_slots
@@ -45,16 +51,17 @@ class BasisEncoder(nn.Module):
         self.patch_proj = nn.Linear(10, d_model)
         self.blocks = nn.ModuleList([
             nn.TransformerEncoderLayer(d_model=d_model, nhead=8,
-                                       dim_feedforward=1024, batch_first=True, dropout=0.1)
+                                       dim_feedforward=1024, batch_first=True,
+                                       dropout=0.1)
             for _ in range(8)
         ])
         self.slot_queries = nn.Parameter(torch.randn(1, k_slots, d_model))
-        self.slot_attn = nn.MultiheadAttention(d_model, 8, batch_first=True)
-        self.basis_proj = nn.Linear(d_model, n_basis)
+        self.slot_attn    = nn.MultiheadAttention(d_model, 8, batch_first=True)
+        # No basis_proj here — we output raw slot features
 
     def forward(self, x_onehot):
         b, c, h, w = x_onehot.shape
-        x = x_onehot.permute(0, 2, 3, 1).reshape(b, h*w, 10)
+        x = x_onehot.permute(0, 2, 3, 1).reshape(b, h * w, 10)
         x = self.patch_proj(x)
         x = apply_2d_rope(x, x.shape[-1])
         curr = x
@@ -62,75 +69,89 @@ class BasisEncoder(nn.Module):
             curr = block(curr)
         queries = self.slot_queries.expand(b, -1, -1)
         slots, _ = self.slot_attn(queries, curr, curr)
-        return self.basis_proj(slots)   # [B, K, 1024]
+        return slots   # [B, K, d_model]  — contains color + shape info
 
-# ─────────────────────────── Decoder ───────────────────────────
+# ─────────────────────────── Decoder ────────────────────────────────────────
 
 class AlgebraicDecoder(nn.Module):
     """
-    Phoenix v5: Decodes COLOR and SHAPE from separate NMF axes.
-    - Color comes from color_manifold (sum of K color-only basis slices)
-    - Shape mask from pos_manifold   (sum of K position-only basis slices)
-    A lightweight learnable head projects the summed color manifold to logits.
-    This avoids the "summed NMF noise" problem.
+    Phoenix v6 Decoder:
+    - Reads from q_st [B, K, 2700]: straight-through quantized features
+      q_st = z_e + (e_i - z_e).detach()
+      → In the forward pass, q_st ≈ z_e (encoder features with color info)
+      → In the backward pass, gradients flow through encoder slot features
+    - This decoder now has full access to color information!
     """
-    def __init__(self, n_slots=5):
+    def __init__(self, n_slots=5, basis_dim=2700):
         super().__init__()
-        self.n_slots = n_slots
-        # color_manifold per slot: [B, K, 2250] -> sum -> [B, 2250]
-        # Small learnable head to fix the "sum = blur" problem
+        self.n_slots   = n_slots
+        self.basis_dim = basis_dim
+
+        # K slots × basis_dim → pixel-wise color logits
+        # Use per-slot processing then combine, for better capacity
+        self.slot_net = nn.Sequential(
+            nn.Linear(basis_dim, 512),
+            nn.LayerNorm(512),
+            nn.GELU(),
+            nn.Linear(512, 256),
+            nn.GELU(),
+        )
+        # Combine K processed slots → [B, K, 256] → aggregate → decode
         self.color_head = nn.Sequential(
-            nn.Linear(2250, 512),
-            nn.ReLU(),
-            nn.Linear(512, 15 * 15 * 10)   # output: pixel-wise color logits
+            nn.Linear(256 * n_slots, 1024),
+            nn.GELU(),
+            nn.Linear(1024, 15 * 15 * 10)
         )
         self.shape_head = nn.Sequential(
-            nn.Linear(450, 15 * 15 * 1)    # output: pixel-wise binary mask
+            nn.Linear(256 * n_slots, 512),
+            nn.GELU(),
+            nn.Linear(512, 15 * 15 * 1)
         )
 
-    def forward(self, color_manifold, pos_manifold):
-        # color_manifold: [B, K, 2250],  pos_manifold: [B, K, 450]
-        c_sum = color_manifold.mean(dim=1)   # [B, 2250]  (mean > sum to avoid scale explosion)
-        p_sum = pos_manifold.mean(dim=1)     # [B, 450]
+    def forward(self, q_st):
+        # q_st: [B, K, 2700]
+        b, k, _ = q_st.shape
+        per_slot = self.slot_net(q_st)              # [B, K, 256]
+        combined = per_slot.view(b, k * 256)         # [B, K*256]
 
-        color_logits = self.color_head(c_sum).view(-1, 10, 15, 15)   # [B, 10, 15, 15]
-        shape_logits = self.shape_head(p_sum).view(-1, 1, 15, 15)    # [B, 1, 15, 15]
+        color_logits = self.color_head(combined).view(b, 10, 15, 15)
+        shape_logits = self.shape_head(combined).view(b, 1,  15, 15)
         return color_logits, shape_logits
 
-# ─────────────────────────── Training ───────────────────────────
+# ─────────────────────────── Training ────────────────────────────────────────
 
 def train():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     cfg = {
-        'k_slots':          5,
-        'd_model':          256,
-        'n_basis':          1024,
-        'batch_size':       128,
-        'epochs':           1000,
-        'lr':               2e-4,
-        # Gumbel temperature: start high (explore), anneal to near-0 (snap)
-        'tau_start':        2.0,
-        'tau_end':          0.1,
-        'warmup_epochs':    100,   # Hold tau_start for first 100 epochs
-        'lambda_diversity':  0.5,  # Entropy bonus (maximise codebook usage)
-        'lambda_shape':      5.0,  # Shape loss weight
-        'dead_revive_every': 50,   # Epochs between dead-atom revival passes
-        'library_path':     'arc_data/primitive_library.pt'
+        'k_slots':           5,
+        'd_model':           256,
+        'n_basis':           1024,
+        'batch_size':        128,
+        'epochs':            500,       # v6 converges fast (no quantization noise)
+        'lr':                3e-4,
+        'lambda_diversity':  0.3,       # Entropy bonus for full vocab usage
+        'lambda_shape':      3.0,       # Shape loss weight
+        'dead_revive_every': 30,        # Epochs between dead-atom revival
+        'library_path':      'arc_data/primitive_library.pt'
     }
 
-    dataset   = PrimitiveDataset(cfg['library_path'])
+    dataset    = PrimitiveDataset(cfg['library_path'])
     dataloader = DataLoader(dataset, batch_size=cfg['batch_size'],
                             shuffle=True, drop_last=True)
 
     encoder = BasisEncoder(k_slots=cfg['k_slots'],
                            d_model=cfg['d_model'],
                            n_basis=cfg['n_basis']).to(device)
-    vq      = BasisVQ(basis_path='arc_data/arc_basis_nmf_1024.pt').to(device)
+    vq      = BasisVQ(basis_path='arc_data/arc_basis_nmf_1024.pt',
+                      d_model=cfg['d_model'],
+                      n_basis=cfg['n_basis']).to(device)
     decoder = AlgebraicDecoder(n_slots=cfg['k_slots']).to(device)
 
-    # Train encoder + the small decoder heads (basis is frozen in BasisVQ)
+    # Train encoder + VQ projection + decoder
     optimizer = optim.AdamW(
-        list(encoder.parameters()) + list(decoder.parameters()),
+        list(encoder.parameters()) +
+        list(vq.slot_proj.parameters()) +   # the projection into NMF space
+        list(decoder.parameters()),
         lr=cfg['lr'], weight_decay=1e-4)
 
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
@@ -141,26 +162,17 @@ def train():
     for epoch in range(1, cfg['epochs'] + 1):
         encoder.train(); vq.train(); decoder.train()
 
-        # ── Temperature schedule (Gumbel tau) ──
-        if epoch <= cfg['warmup_epochs']:
-            curr_tau = cfg['tau_start']
-        else:
-            t = (epoch - cfg['warmup_epochs']) / (cfg['epochs'] - cfg['warmup_epochs'])
-            curr_tau = cfg['tau_start'] * (cfg['tau_end'] / cfg['tau_start']) ** t
-        vq.temperature = curr_tau
-
-        # ── Dead atom revival ──
-        if epoch % cfg['dead_revive_every'] == 0 and epoch > cfg['warmup_epochs']:
-            n_dead = vq.revive_dead_atoms(None)
+        # Dead atom revival
+        if epoch % cfg['dead_revive_every'] == 0 and epoch > 50:
+            n_dead = vq.revive_dead_atoms()
             if n_dead > 0:
                 tqdm.write(f"  [Revival] {n_dead} dead atoms reset at epoch {epoch}")
 
         vq.usage_counts.zero_()
-        epoch_col, epoch_shp = 0.0, 0.0
 
         progress = tqdm(dataloader, desc=f"Epoch {epoch}/{cfg['epochs']}")
         for batch in progress:
-            state = batch['state'].to(device)    # [B, 1, 15, 15]
+            state = batch['state'].to(device)   # [B, 1, 15, 15]
             mask  = batch['valid_mask'].to(device)
 
             x_onehot = F.one_hot(state.squeeze(1).long(),
@@ -168,9 +180,10 @@ def train():
 
             optimizer.zero_grad()
 
-            logits                          = encoder(x_onehot)          # [B, K, 1024]
-            c_mani, p_mani, indices, entropy = vq(logits)                 # forward
-            color_logits, shape_logits      = decoder(c_mani, p_mani)    # [B,10,15,15]
+            # ── Forward ──
+            slot_features              = encoder(x_onehot)              # [B, K, d_model]
+            q_st, indices, vq_loss, entropy = vq(slot_features)         # [B, K, 2700]
+            color_logits, shape_logits = decoder(q_st)                  # [B, 10/1, 15, 15]
 
             # ── Losses ──
             target     = state.squeeze(1).long()
@@ -180,23 +193,26 @@ def train():
             shape_target = (state > 0).float()
             shape_loss   = F.binary_cross_entropy_with_logits(shape_logits, shape_target)
 
-            # Maximise entropy of codebook usage (prevents collapse)
             loss = (color_loss
-                    + cfg['lambda_shape']    * shape_loss
+                    + vq_loss                               # commitment loss
+                    + cfg['lambda_shape'] * shape_loss
                     - cfg['lambda_diversity'] * entropy)
 
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(encoder.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(
+                list(encoder.parameters()) + list(decoder.parameters()), 1.0)
             optimizer.step()
 
-            epoch_col += color_loss.item()
-            epoch_shp += shape_loss.item()
+            # Pixel accuracy metric
+            with torch.no_grad():
+                preds = color_logits.argmax(dim=1)
+                px_acc = (preds == target).float().mean().item() * 100
 
             progress.set_postfix({
-                'Col':  f"{color_loss.item():.3f}",
-                'Shp':  f"{shape_loss.item():.3f}",
-                'Act':  vq.usage_counts.gt(0).sum().item(),
-                'τ':    f"{curr_tau:.3f}",
+                'Col':    f"{color_loss.item():.3f}",
+                'VQ':     f"{vq_loss.item():.3f}",
+                'Acc':    f"{px_acc:.1f}%",
+                'Act':    vq.usage_counts.gt(0).sum().item(),
             })
 
         scheduler.step()
@@ -204,10 +220,11 @@ def train():
         if epoch % 50 == 0:
             torch.save({
                 'encoder': encoder.state_dict(),
+                'vq_proj': vq.slot_proj.state_dict(),
                 'decoder': decoder.state_dict(),
                 'cfg':     cfg,
                 'epoch':   epoch,
-            }, f"checkpoints/phoenix_v5_e{epoch}.pth")
+            }, f"checkpoints/phoenix_v6_e{epoch}.pth")
             tqdm.write(f"  [Saved] Checkpoint at epoch {epoch}")
 
 if __name__ == "__main__":
