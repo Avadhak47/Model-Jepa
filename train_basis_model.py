@@ -10,7 +10,26 @@ import numpy as np
 from tools.extract_arc_objects import PrimitiveDataset
 from modules.basis_vq import BasisVQ
 
-# ... [apply_2d_rope remains same] ...
+def apply_2d_rope(x, d_model):
+    """2D Rotary Positional Embedding for a 15x15 grid."""
+    b, n, d = x.shape
+    h = int(np.sqrt(n))
+    device = x.device
+    y_coords, x_coords = torch.meshgrid(torch.arange(h, device=device), torch.arange(h, device=device), indexing='ij')
+    y_coords = y_coords.flatten().float()
+    x_coords = x_coords.flatten().float()
+    inv_freq = 1.0 / (10000 ** (torch.arange(0, d, 4, device=device).float() / d))
+    sin_y = torch.sin(y_coords.unsqueeze(1) * inv_freq)
+    cos_y = torch.cos(y_coords.unsqueeze(1) * inv_freq)
+    sin_x = torch.sin(x_coords.unsqueeze(1) * inv_freq)
+    cos_x = torch.cos(x_coords.unsqueeze(1) * inv_freq)
+    x_rot = x.clone()
+    half = d // 2
+    x_rot[:, :, :half:2] = x[:, :, :half:2] * cos_y - x[:, :, 1:half:2] * sin_y
+    x_rot[:, :, 1:half:2] = x[:, :, :half:2] * sin_y + x[:, :, 1:half:2] * cos_y
+    x_rot[:, :, half::2] = x[:, :, half::2] * cos_x - x[:, :, half+1::2] * sin_x
+    x_rot[:, :, half+1::2] = x[:, :, half::2] * sin_x + x[:, :, half+1::2] * cos_x
+    return x_rot
 
 class BasisEncoder(nn.Module):
     def __init__(self, k_slots=3, d_model=256, n_basis=1024):
@@ -46,8 +65,7 @@ class AlgebraicDecoder(nn.Module):
         combined = manifold_slots.sum(dim=1)
         grid_3d = combined.view(-1, 15, 15, 12)
         color_logits = grid_3d[:, :, :, :10]
-        # Added: Return mask prediction separately for shape-first learning
-        mask_logits = grid_3d[:, :, :, 10:12].sum(dim=-1, keepdim=True) # Structural energy
+        mask_logits = grid_3d[:, :, :, 10:12].sum(dim=-1, keepdim=True)
         return color_logits.permute(0, 3, 1, 2), mask_logits.permute(0, 3, 1, 2)
 
 def train():
@@ -56,14 +74,14 @@ def train():
         'k_slots': 3,
         'd_model': 256,
         'n_basis': 1024,
-        'batch_size': 128, # Increased batch size for diversity
+        'batch_size': 128,
         'epochs': 1000,
         'lr_init': 1e-4,
         'gain_start': 1.0,
         'gain_end': 50.0,
-        'warmup_epochs': 250, # EXTENDED CHILDHOOD: Hold gain at 1.0
-        'lambda_diversity': 0.3, # Harder penalty on collapse
-        'lambda_shape': 5.0, # SHAPE-FIRST: Heavy weight on getting the mask right
+        'warmup_epochs': 250,
+        'lambda_diversity': 0.3,
+        'lambda_shape': 5.0,
         'library_path': 'arc_data/primitive_library.pt'
     }
     
@@ -79,7 +97,6 @@ def train():
         encoder.train()
         vq.train()
         
-        # 1. ANNEALING (Now with Warmup Delay)
         if epoch <= cfg['warmup_epochs']:
             curr_gain = cfg['gain_start']
         else:
@@ -96,23 +113,17 @@ def train():
             x_mask = (state > 0).float()
             
             optimizer.zero_grad()
-            
-            # 2. FORWARD
             basis_logits = encoder(x_mask)
             q_manifold, indices = vq(basis_logits)
             color_logits, mask_logits = decoder(q_manifold)
             
-            # 3. LOSSES
-            # Reconstruction (Color)
             target = state.squeeze(1).long()
             color_loss = F.cross_entropy(color_logits, target, reduction='none')
             color_loss = (color_loss * mask).sum() / (mask.sum() + 1e-8)
             
-            # SHAPE LOSS (Binary Cross Entropy on the mask)
             shape_target = x_mask
             shape_loss = F.binary_cross_entropy_with_logits(mask_logits, shape_target)
             
-            # DIVERSITY
             probs = F.softmax(basis_logits.view(-1, cfg['n_basis']), dim=-1)
             avg_probs = probs.mean(dim=0)
             diversity_loss = -torch.sum(avg_probs * torch.log(avg_probs + 1e-8))
@@ -128,8 +139,8 @@ def train():
                 'G': f"{curr_gain:.1f}"
             })
             
-        if epoch % 20 == 0:
-            torch.save({'encoder': encoder.state_dict(), 'cfg': cfg}, f"checkpoints/phoenix_v3_e{epoch}.pth")
+        if epoch % 50 == 0:
+            torch.save({'encoder': encoder.state_dict(), 'cfg': cfg}, f"checkpoints/phoenix_v4_e{epoch}.pth")
 
 if __name__ == "__main__":
     train()
