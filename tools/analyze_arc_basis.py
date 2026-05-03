@@ -116,7 +116,7 @@ def analyze_basis(library_path, n_components=1024):
 
     accs = []
     for i in range(min(1000, X_tensor.shape[0])):
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     # ── Simple nearest-neighbour lookup audit ──
     # (reconstruct each object using top-5 atoms from the codebook)
