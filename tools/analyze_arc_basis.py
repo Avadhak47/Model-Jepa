@@ -23,29 +23,39 @@ ARC_COLORS = [
 ]
 cmap = ListedColormap(ARC_COLORS)
 
+def denoise_grid(grid):
+    """
+    Remove stray pixels that don't contribute to geometric structure.
+    If a color appears only once in a 15x15 grid, it's likely noise.
+    """
+    new_grid = grid.copy()
+    counts = np.bincount(grid.flatten(), minlength=10)
+    primary_color = np.argmax(counts[1:]) + 1 if counts[1:].sum() > 0 else 0
+    
+    for color in range(1, 10):
+        if counts[color] == 1 and color != primary_color:
+            # Wipe isolated single-pixel outliers
+            new_grid[grid == color] = 0
+    return new_grid
+
 def build_feature_matrix(tensors):
     """
-    Convert integer grids [N, 15, 15] to foreground-only color matrix [N, 2025].
-    2025 = 15 * 15 * 9  (9 foreground colors, color 0 / black EXCLUDED).
-
-    Why exclude color 0?
-      ARC objects are padded to 15×15. Most pixels are black background.
-      If we include color 0, NMF collapses to 'mostly-black' atoms because
-      that's the dominant signal. Excluding it forces atoms to represent
-      real foreground structure instead.
-
-    Reconstruction: pixels with no foreground channel activation → predicted black.
+    Convert integer grids [N, 15, 15] to 10-channel one-hot matrix [N, 2250].
+    
+    We include color 0 (black) but down-weight it (0.1) so padding doesn't 
+    dominate, while still allowing the model to see black shapes (rings/hollows).
     """
     n = tensors.shape[0]
-    X = np.zeros((n, 2025), dtype=np.float32)  # 15*15*9
+    X = np.zeros((n, 2250), dtype=np.float32)  # 15*15*10
     for i in range(n):
         grid = tensors[i].astype(int)  # [15, 15]
         for r in range(15):
             for c in range(15):
                 color = grid[r, c]
-                if color > 0:  # Skip background (color 0)
-                    # Map color 1-9 to channels 0-8
-                    X[i, (r * 15 + c) * 9 + (color - 1)] = 1.0
+                # Map color 0-9 to channels 0-9
+                # WEIGHTING: Color 0 gets 0.1 weight
+                val = 1.0 if color > 0 else 0.1
+                X[i, (r * 15 + c) * 10 + color] = val
     return X
 
 def analyze_basis(library_path, n_components=1024):
@@ -54,18 +64,14 @@ def analyze_basis(library_path, n_components=1024):
     n_total = tensors.shape[0]
     print(f"Loaded {n_total} objects from library.")
 
-    # ── Build feature matrix: ALL objects (color + geometry) ──
-    # No deduplication — we want color variants as separate training samples
-    print(f"Building one-hot color feature matrix [{n_total} × 2250]...")
-    X = build_feature_matrix(tensors)
+    # ── Denoise and Build feature matrix ──
+    print(f"Denoising and building one-hot matrix [{n_total} × 2250]...")
+    denoised_tensors = np.array([denoise_grid(t) for t in tensors])
+    X = build_feature_matrix(denoised_tensors)
 
-    # Remove all-black rows (objects with no foreground pixels at all)
-    row_sums = X.sum(axis=1)
-    valid = row_sums > 0
-    X = X[valid]
-    tensors = tensors[valid]
-    print(f"  After removing empty objects: {X.shape[0]} samples")
-    print(f"  Feature dim: {X.shape[1]} (15×15×9, background excluded)")
+    # All rows are non-empty now because color 0 is included
+    print(f"  Samples: {X.shape[0]}")
+    print(f"  Feature dim: {X.shape[1]} (15×15×10, weighted)")
 
     # L1-normalize each row: foreground pixel count varies per object
     row_norms = X.sum(axis=1, keepdims=True)
@@ -81,10 +87,13 @@ def analyze_basis(library_path, n_components=1024):
         init='nndsvda',
         solver='mu',
         beta_loss='kullback-leibler',
-        max_iter=800,       # Run longer — was stopping at epoch 80 due to loose tol
+        max_iter=2000,      # Give it plenty of time to find the global minimum
         random_state=42,
         verbose=1,
-        tol=1e-6,           # Tight tol — let it converge fully, not stop early
+        tol=1e-6,
+        alpha_W=0.001,      # Slight sparsity on weights
+        alpha_H=0.1,        # HEAVY sparsity on atoms — this REMOVES NOISE
+        l1_ratio=1.0,       # Pure L1 for maximum 'cleanliness'
     )
     W = nmf.fit_transform(X_norm)   # [N, K] — object-to-atom weights
     H = nmf.components_             # [K, 2250] — the atoms
@@ -164,16 +173,18 @@ def analyze_basis(library_path, n_components=1024):
 
     for i, idx in enumerate(sample_ids):
         ax = axes[i // 3, i % 3]
-        atom     = H[idx].reshape(15, 15, 9)     # [15, 15, 9] foreground channels
-        # Add implicit background channel (value=0) so argmax gives colors 0–9
-        atom_10ch = np.concatenate([np.zeros((15, 15, 1)), atom], axis=-1)   # [15, 15, 10]
-        grid      = np.argmax(atom_10ch, axis=-1)   # [15, 15]
-        intensity = np.max(atom, axis=-1)            # [15, 15]  max over 9 foreground channels
+        atom = H[idx].reshape(15, 15, 10)     # [15, 15, 10] all colors
+        
+        # Re-weight the background channel for visualization (undo the 0.1x)
+        atom_viz = atom.copy()
+        atom_viz[:, :, 0] *= 10.0
+        
+        grid = np.argmax(atom_viz, axis=-1)   # [15, 15]
+        intensity = np.max(atom_viz, axis=-1) 
 
-        # Relative threshold: only show pixels above 20% of this atom's own peak
-        # (absolute 0.1 was too aggressive — made most atoms appear all-black)
-        thresh = np.max(intensity) * 0.20
-        grid[intensity < thresh] = 0   # mask low-activation pixels → black
+        # Relative threshold for clean display
+        thresh = np.max(intensity) * 0.15
+        grid[intensity < thresh] = 0   
 
         ax.imshow(grid, cmap=cmap, vmin=0, vmax=9, interpolation='nearest')
         ax.set_title(f"Atom #{idx} (max={np.max(intensity):.2f})", fontsize=9)

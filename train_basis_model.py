@@ -12,6 +12,17 @@ from modules.basis_vq import BasisVQ
 
 # ─────────────────────────── Helpers ────────────────────────────────────────
 
+def focal_loss(logits, target, mask, gamma=2.0):
+    """
+    Focal Loss for ARC: Penalizes the model more for missing foreground pixels.
+    logits: [B, 10, 15, 15], target: [B, 15, 15], mask: [B, 1, 15, 15]
+    """
+    ce_loss = F.cross_entropy(logits, target, reduction='none')
+    pt = torch.exp(-ce_loss) # probability of the correct class
+    focal_weight = (1 - pt) ** gamma
+    loss = (focal_weight * ce_loss * mask.squeeze(1)).sum() / (mask.sum() + 1e-8)
+    return loss
+
 def apply_2d_rope(x, d_model):
     """2D Rotary Positional Embedding for a 15x15 grid."""
     b, n, d = x.shape
@@ -188,8 +199,7 @@ def train():
 
             # ── Losses ──
             target     = state.squeeze(1).long()
-            color_loss = F.cross_entropy(color_logits, target, reduction='none')
-            color_loss = (color_loss * mask).sum() / (mask.sum() + 1e-8)
+            color_loss = focal_loss(color_logits, target, mask, gamma=2.0)
 
             shape_target = (state > 0).float()
             shape_loss   = F.binary_cross_entropy_with_logits(shape_logits, shape_target)
