@@ -136,7 +136,7 @@ def train():
         'k_slots':           5,
         'd_model':           256,
         'n_basis':           1024,
-        'batch_size':        512,
+        'batch_size':        128,
         'epochs':            500,       # v6 converges fast (no quantization noise)
         'lr':                5e-4,
         'lambda_diversity':  1.0,       # Increased to fight collapse

@@ -23,7 +23,7 @@ def denoise_grid(grid):
     """Matches the geometric purity filter in analyze_arc_basis.py."""
     h, w = grid.shape
     new_grid = grid.copy()
-    counts = np.bincount(grid.flatten(), minlength=10)
+    counts = np.bincount(grid.astype(int).flatten(), minlength=10)
     freq_colors = np.argsort(counts[1:])[::-1] + 1
     top_2 = freq_colors[:2]
     for c in range(1, 10):
