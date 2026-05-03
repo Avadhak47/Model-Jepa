@@ -25,19 +25,27 @@ cmap = ListedColormap(ARC_COLORS)
 
 def build_feature_matrix(tensors):
     """
-    Convert integer grids [N, 15, 15] to one-hot color matrix [N, 2250].
-    2250 = 15 * 15 * 10 (10 color classes per pixel, NO position channels).
-    Black (color=0) is included as its own channel — background is a signal too.
+    Convert integer grids [N, 15, 15] to foreground-only color matrix [N, 2025].
+    2025 = 15 * 15 * 9  (9 foreground colors, color 0 / black EXCLUDED).
+
+    Why exclude color 0?
+      ARC objects are padded to 15×15. Most pixels are black background.
+      If we include color 0, NMF collapses to 'mostly-black' atoms because
+      that's the dominant signal. Excluding it forces atoms to represent
+      real foreground structure instead.
+
+    Reconstruction: pixels with no foreground channel activation → predicted black.
     """
     n = tensors.shape[0]
-    X = np.zeros((n, 2250), dtype=np.float32)
+    X = np.zeros((n, 2025), dtype=np.float32)  # 15*15*9
     for i in range(n):
         grid = tensors[i].astype(int)  # [15, 15]
         for r in range(15):
             for c in range(15):
                 color = grid[r, c]
-                # One-hot: pixel (r,c) with color k → channel (r*15+c)*10 + k
-                X[i, (r * 15 + c) * 10 + color] = 1.0
+                if color > 0:  # Skip background (color 0)
+                    # Map color 1-9 to channels 0-8
+                    X[i, (r * 15 + c) * 9 + (color - 1)] = 1.0
     return X
 
 def analyze_basis(library_path, n_components=1024):
@@ -51,31 +59,32 @@ def analyze_basis(library_path, n_components=1024):
     print(f"Building one-hot color feature matrix [{n_total} × 2250]...")
     X = build_feature_matrix(tensors)
 
-    # Remove all-black rows (empty objects with no pixels)
+    # Remove all-black rows (objects with no foreground pixels at all)
     row_sums = X.sum(axis=1)
     valid = row_sums > 0
     X = X[valid]
     tensors = tensors[valid]
     print(f"  After removing empty objects: {X.shape[0]} samples")
+    print(f"  Feature dim: {X.shape[1]} (15×15×9, background excluded)")
 
-    # L1-normalize each row so large objects don't dominate atom discovery
+    # L1-normalize each row: foreground pixel count varies per object
     row_norms = X.sum(axis=1, keepdims=True)
     X_norm = X / (row_norms + 1e-8)
 
     # ── Run NMF ──
     print(f"Running NMF ({n_components} components) on {X_norm.shape[0]} objects...")
-    print(f"  Feature space: {X_norm.shape[1]} dims (15×15×10 one-hot color)")
-    print(f"  This may take 5–15 minutes. Use Ctrl+C to stop early if loss plateaus.")
+    print(f"  Feature space: {X_norm.shape[1]} dims (15×15×9, foreground colors only)")
+    print(f"  This may take 5–15 minutes. Error should drop well below 5.0 now.")
 
     nmf = NMF(
         n_components=n_components,
         init='nndsvda',     # Better init than 'random' — uses SVD approximation
         solver='mu',        # Multiplicative update (better for sparse data)
         beta_loss='kullback-leibler',   # KL divergence better for one-hot data than Frobenius
-        max_iter=2000,
+        max_iter=500,       # 500 is enough — error plateaus after ~400 on this dataset
         random_state=42,
         verbose=1,
-        tol=1e-4,
+        tol=1e-3,           # Stop early if improvement drops below this threshold
     )
     W = nmf.fit_transform(X_norm)   # [N, K] — object-to-atom weights
     H = nmf.components_             # [K, 2250] — the atoms
@@ -93,27 +102,32 @@ def analyze_basis(library_path, n_components=1024):
 
     # ── Quick reconstruction audit ──
     print("\nRunning quick reconstruction audit (K=5 nearest atoms)...")
-    H_tensor = torch.from_numpy(H).float()
+    H_tensor = torch.from_numpy(H).float()   # [1024, 2025]
     X_tensor = torch.from_numpy(X_norm).float()
 
     accs = []
     for i in range(min(1000, X_tensor.shape[0])):
-        obj  = X_tensor[i]                              # [2250]
-        dist = ((H_tensor - obj.unsqueeze(0)) ** 2).sum(dim=1)   # [K]
+        obj  = X_tensor[i]                              # [2025]
+        dist = ((H_tensor - obj.unsqueeze(0)) ** 2).sum(dim=1)
         top5 = dist.topk(5, largest=False).indices
 
-        # Reconstruct: weighted sum of K nearest atoms
         dists_k = dist[top5]
         weights  = 1.0 / (dists_k + 1e-8)
         weights  = weights / weights.sum()
-        recon    = (H_tensor[top5] * weights.unsqueeze(1)).sum(dim=0)   # [2250]
+        recon    = (H_tensor[top5] * weights.unsqueeze(1)).sum(dim=0)   # [2025]
 
-        # Pixel accuracy: compare argmax color per pixel
-        orig_grid  = recon.view(15, 15, 10).argmax(dim=-1)   # use obj not recon for orig
-        obj_grid   = obj.view(15, 15, 10).argmax(dim=-1)
-        recon_grid = recon.view(15, 15, 10).argmax(dim=-1)
+        # Pixel accuracy: recon is [2025] = 15×15×9 (foreground channels)
+        # Argmax over 9 channels + 1 implicit background gives 10-way prediction
+        recon_9ch  = recon.view(15, 15, 9)                # [15, 15, 9]
+        # Add a background channel (all zeros → background wins if no foreground)
+        bg_channel = torch.zeros(15, 15, 1)               # implicit black
+        recon_10ch = torch.cat([bg_channel, recon_9ch], dim=-1)  # [15, 15, 10]
+        recon_grid = recon_10ch.argmax(dim=-1)            # [15, 15]  colors 0-9
 
-        acc = (recon_grid == obj_grid).float().mean().item() * 100
+        # Original grid from tensors
+        orig_idx = i % tensors.shape[0]
+        orig_grid = torch.from_numpy(tensors[orig_idx].astype(np.int64))
+        acc = (recon_grid == orig_grid).float().mean().item() * 100
         accs.append(acc)
 
     mean_acc = np.mean(accs)
@@ -128,16 +142,16 @@ def analyze_basis(library_path, n_components=1024):
     # ── Save ──
     os.makedirs('arc_data', exist_ok=True)
     torch.save({
-        'basis':        torch.from_numpy(H).float(),    # [1024, 2250]
+        'basis':        torch.from_numpy(H).float(),    # [1024, 2025]
         'weights':      torch.from_numpy(W).float(),    # [N, 1024]
         'n_components': n_components,
-        'feature_dim':  2250,                           # 15×15×10
-        'encoding':     'one_hot_color_only',           # no position channels
+        'feature_dim':  2025,                           # 15×15×9 (foreground only)
+        'encoding':     'one_hot_foreground_only',      # color 0 excluded
         'n_objects':    X_norm.shape[0],
         'recon_err':    float(recon_err),
     }, 'arc_data/arc_basis_nmf_1024.pt')
     print(f"\nSaved → arc_data/arc_basis_nmf_1024.pt")
-    print(f"  Basis shape: {H.shape}  (n_components × 2250)")
+    print(f"  Basis shape: {H.shape}  (n_components × 2025)")
 
     # ── Visualize 6 sample atoms ──
     print("Generating atom preview...")
@@ -150,10 +164,12 @@ def analyze_basis(library_path, n_components=1024):
 
     for i, idx in enumerate(sample_ids):
         ax = axes[i // 3, i % 3]
-        atom   = H[idx].reshape(15, 15, 10)   # [15, 15, 10]
-        grid   = np.argmax(atom, axis=-1)      # [15, 15]
-        intensity = np.max(atom, axis=-1)
-        grid[intensity < 0.1] = 0              # mask weak activations
+        atom = H[idx].reshape(15, 15, 9)    # [15, 15, 9] foreground channels
+        # Add implicit background channel so argmax gives colors 0-9
+        atom_10ch = np.concatenate([np.zeros((15, 15, 1)), atom], axis=-1)
+        grid      = np.argmax(atom_10ch, axis=-1)   # [15, 15]
+        intensity = np.max(atom_10ch, axis=-1)
+        grid[intensity < 0.1] = 0   # mask weak activations → black
 
         ax.imshow(grid, cmap=cmap, vmin=0, vmax=9, interpolation='nearest')
         ax.set_title(f"Atom #{idx}", fontsize=9)
