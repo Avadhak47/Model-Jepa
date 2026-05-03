@@ -81,11 +81,11 @@ def build_feature_matrix(tensors):
         grid = tensors[i].astype(int)  # [15, 15]
         for r in range(15):
             for c in range(15):
-                color = grid[r, c]
-                # Map color 0-9 to channels 0-9
-                # WEIGHTING: Color 0 gets 0.1 weight
-                val = 1.0 if color > 0 else 0.1
-                X[i, (r * 15 + c) * 10 + color] = val
+                for color in range(10):
+                    if color == grid[r, c]:
+                        X[i, (r * 15 + c) * 10 + color] = 1.0
+                    else:
+                        X[i, (r * 15 + c) * 10 + color] = 0.0
     return X
 
 def analyze_basis(library_path, n_components=1024):
@@ -101,28 +101,27 @@ def analyze_basis(library_path, n_components=1024):
 
     # All rows are non-empty now because color 0 is included
     print(f"  Samples: {X.shape[0]}")
-    print(f"  Feature dim: {X.shape[1]} (15×15×10, weighted)")
+    print(f"  Feature dim: {X.shape[1]} (15×15×10, raw)")
 
-    # L1-normalize each row: foreground pixel count varies per object
-    row_norms = X.sum(axis=1, keepdims=True)
-    X_norm = X / (row_norms + 1e-8)
-
+    # We skip normalization for now to ensure strong gradients
+    X_norm = X
+    
     # ── Run NMF ──
     print(f"Running NMF ({n_components} components) on {X_norm.shape[0]} objects...")
-    print(f"  Feature space: {X_norm.shape[1]} dims (15×15×10, weighted)")
-    print(f"  This may take 5–15 minutes. Error should drop well below 5.0 now.")
+    print(f"  Feature space: {X_norm.shape[1]} dims (15×15×10, raw)")
+    print(f"  Using Random Init + MU solver for maximum robustness.")
 
     nmf = NMF(
         n_components=n_components,
-        init='nndsvda',
-        solver='mu',         # MU is more robust to high-dim discrete data
+        init='random',       # Random start to break the 'paralysis'
+        solver='mu',
         beta_loss='kullback-leibler', 
-        max_iter=1000,       # Start with 1000, it will converge faster than CD
+        max_iter=1000,
         random_state=42,
         verbose=1,
-        tol=1e-7,            # Tight enough for good atoms
+        tol=1e-6,
         alpha_W=0.0,      
-        alpha_H=0.01,        # Stronger sparsity to force solid shapes
+        alpha_H=0.0,         # Start with 0 penalty to ensure it moves
         l1_ratio=1.0,
     )
     W = nmf.fit_transform(X_norm)   # [N, K] — object-to-atom weights
