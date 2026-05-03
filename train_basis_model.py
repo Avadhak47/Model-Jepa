@@ -75,47 +75,47 @@ class BasisEncoder(nn.Module):
 
 class AlgebraicDecoder(nn.Module):
     """
-    Phoenix v6 Decoder:
-    - Reads from q_st [B, K, 2700]: straight-through quantized features
-      q_st = z_e + (e_i - z_e).detach()
-      → In the forward pass, q_st ≈ z_e (encoder features with color info)
-      → In the backward pass, gradients flow through encoder slot features
-    - This decoder now has full access to color information!
+    Phoenix v6 Broadcast Decoder:
+    Forces slot competition by making each slot reconstruct its own 
+    local patch + alpha mask. Final image = sum(slot_color * slot_alpha).
     """
     def __init__(self, n_slots=5, basis_dim=2025):
         super().__init__()
         self.n_slots   = n_slots
         self.basis_dim = basis_dim
 
-        # K slots × basis_dim → pixel-wise color logits
+        # Per-slot processing (Shared across slots)
         self.slot_net = nn.Sequential(
             nn.Linear(basis_dim, 512),
             nn.LayerNorm(512),
             nn.GELU(),
-            nn.Linear(512, 256),
+            nn.Linear(512, 1024),
+            nn.LayerNorm(1024),
             nn.GELU(),
-        )
-        # Combine K processed slots → [B, K, 256] → aggregate → decode
-        self.color_head = nn.Sequential(
-            nn.Linear(256 * n_slots, 1024),
-            nn.GELU(),
-            nn.Linear(1024, 15 * 15 * 10)
-        )
-        self.shape_head = nn.Sequential(
-            nn.Linear(256 * n_slots, 512),
-            nn.GELU(),
-            nn.Linear(512, 15 * 15 * 1)
+            nn.Linear(1024, 15 * 15 * 11), # 10 colors + 1 alpha mask
         )
 
     def forward(self, q_st):
         # q_st: [B, K, basis_dim]
         b, k, _ = q_st.shape
-        per_slot = self.slot_net(q_st)              # [B, K, 256]
-        combined = per_slot.view(b, k * 256)         # [B, K*256]
-
-        color_logits = self.color_head(combined).view(b, 10, 15, 15)
-        shape_logits = self.shape_head(combined).view(b, 1,  15, 15)
-        return color_logits, shape_logits
+        
+        # Process each slot independently
+        # [B, K, 15*15*11] -> [B, K, 11, 15, 15]
+        decoded = self.slot_net(q_st).view(b, k, 11, 15, 15)
+        
+        slot_colors = decoded[:, :, :10, :, :]  # [B, K, 10, 15, 15]
+        slot_alphas = decoded[:, :, 10:, :, :]  # [B, K, 1, 15, 15]
+        
+        # Softmax masks over slots so they "partition" the image
+        masks = F.softmax(slot_alphas, dim=1)   # [B, K, 1, 15, 15]
+        
+        # Weighted sum of colors
+        combined_logits = (slot_colors * masks).sum(dim=1) # [B, 10, 15, 15]
+        
+        # For shape loss, we use the aggregate mask intensity
+        shape_logits = masks.sum(dim=1) # [B, 1, 15, 15] (should be ~1.0 everywhere)
+        
+        return combined_logits, shape_logits
 
 # ─────────────────────────── Training ────────────────────────────────────────
 
@@ -125,12 +125,12 @@ def train():
         'k_slots':           5,
         'd_model':           256,
         'n_basis':           1024,
-        'batch_size':        128,
+        'batch_size':        512,
         'epochs':            500,       # v6 converges fast (no quantization noise)
-        'lr':                3e-4,
-        'lambda_diversity':  0.3,       # Entropy bonus for full vocab usage
-        'lambda_shape':      3.0,       # Shape loss weight
-        'dead_revive_every': 30,        # Epochs between dead-atom revival
+        'lr':                5e-4,
+        'lambda_diversity':  1.0,       # Increased to fight collapse
+        'lambda_shape':      1.0,       
+        'dead_revive_every': 20,        # Reset more frequently
         'library_path':      'arc_data/primitive_library.pt'
     }
 
