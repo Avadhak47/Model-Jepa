@@ -26,18 +26,47 @@ cmap = ListedColormap(ARC_COLORS)
 
 def denoise_grid(grid):
     """
-    Remove stray pixels that don't contribute to geometric structure.
-    If a color appears only once in a 15x15 grid, it's likely noise.
+    ARC Geometric Purity Filter:
+    1. Connectivity: Pixels must have a neighbor of the same color (kills static).
+    2. Color-Sparsity: Only keep the top 2 colors per object (kills multicolor noise).
     """
+    h, w = grid.shape
     new_grid = grid.copy()
-    counts = np.bincount(grid.flatten(), minlength=10)
-    primary_color = np.argmax(counts[1:]) + 1 if counts[1:].sum() > 0 else 0
     
-    for color in range(1, 10):
-        if counts[color] == 1 and color != primary_color:
-            # Wipe isolated single-pixel outliers
-            new_grid[grid == color] = 0
-    return new_grid
+    # --- 1. Color Sparsity ---
+    counts = np.bincount(grid.flatten(), minlength=10)
+    # Get colors 1-9 sorted by frequency
+    freq_colors = np.argsort(counts[1:])[::-1] + 1
+    top_2 = freq_colors[:2]
+    
+    # Wipe any color not in the top 2
+    for c in range(1, 10):
+        if c not in top_2 or counts[c] == 0:
+            new_grid[grid == c] = 0
+            
+    # --- 2. Connectivity (8-neighborhood) ---
+    final_grid = new_grid.copy()
+    for r in range(h):
+        for c in range(w):
+            color = new_grid[r, c]
+            if color == 0: continue
+            
+            # Check neighbors
+            has_neighbor = False
+            for dr in [-1, 0, 1]:
+                for dc in [-1, 0, 1]:
+                    if dr == 0 and dc == 0: continue
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < h and 0 <= nc < w:
+                        if new_grid[nr, nc] == color:
+                            has_neighbor = True
+                            break
+                if has_neighbor: break
+            
+            if not has_neighbor:
+                final_grid[r, c] = 0
+                
+    return final_grid
 
 def build_feature_matrix(tensors):
     """
@@ -80,20 +109,20 @@ def analyze_basis(library_path, n_components=1024):
 
     # ── Run NMF ──
     print(f"Running NMF ({n_components} components) on {X_norm.shape[0]} objects...")
-    print(f"  Feature space: {X_norm.shape[1]} dims (15×15×9, foreground colors only)")
+    print(f"  Feature space: {X_norm.shape[1]} dims (15×15×10, weighted)")
     print(f"  This may take 5–15 minutes. Error should drop well below 5.0 now.")
 
     nmf = NMF(
         n_components=n_components,
         init='nndsvda',
-        solver='cd',         # Coordinate Descent is MUCH faster for 10,000 epochs
-        beta_loss='frobenius', 
-        max_iter=10000,      # Force long run
+        solver='mu',         # MU is more robust to high-dim discrete data
+        beta_loss='kullback-leibler', 
+        max_iter=1000,       # Start with 1000, it will converge faster than CD
         random_state=42,
         verbose=1,
-        tol=0,               # Never stop early
-        alpha_W=0.0001,      
-        alpha_H=0.05,        # Keep it clean
+        tol=1e-7,            # Tight enough for good atoms
+        alpha_W=0.0,      
+        alpha_H=0.01,        # Stronger sparsity to force solid shapes
         l1_ratio=1.0,
     )
     W = nmf.fit_transform(X_norm)   # [N, K] — object-to-atom weights
@@ -157,16 +186,16 @@ def analyze_basis(library_path, n_components=1024):
     # ── Save ──
     os.makedirs('arc_data', exist_ok=True)
     torch.save({
-        'basis':        torch.from_numpy(H).float(),    # [1024, 2025]
+        'basis':        torch.from_numpy(H).float(),    # [1024, 2250]
         'weights':      torch.from_numpy(W).float(),    # [N, 1024]
         'n_components': n_components,
-        'feature_dim':  2025,                           # 15×15×9 (foreground only)
-        'encoding':     'one_hot_foreground_only',      # color 0 excluded
+        'feature_dim':  2250,                           # 15×15×10 (all colors)
+        'encoding':     'one_hot_weighted_bg',          # color 0 weighted 0.1x
         'n_objects':    X_norm.shape[0],
         'recon_err':    float(recon_err),
     }, 'arc_data/arc_basis_nmf_1024.pt')
     print(f"\nSaved → arc_data/arc_basis_nmf_1024.pt")
-    print(f"  Basis shape: {H.shape}  (n_components × 2025)")
+    print(f"  Basis shape: {H.shape}  (n_components × 2250)")
 
     # ── Visualize 6 sample atoms ──
     print("Generating atom preview...")
