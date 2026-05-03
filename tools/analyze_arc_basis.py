@@ -109,19 +109,19 @@ def analyze_basis(library_path, n_components=1024):
     # ── Run NMF ──
     print(f"Running NMF ({n_components} components) on {X_norm.shape[0]} objects...")
     print(f"  Feature space: {X_norm.shape[1]} dims (15×15×10, raw)")
-    print(f"  Using Random Init + MU solver for maximum robustness.")
+    print(f"  Target error for raw data is ~200-300. (598 was the start).")
 
     nmf = NMF(
         n_components=n_components,
-        init='random',       # Random start to break the 'paralysis'
-        solver='mu',
-        beta_loss='kullback-leibler', 
-        max_iter=1000,
+        init='random',
+        solver='cd',         # CD is faster for the 'polishing' phase
+        beta_loss='frobenius', 
+        max_iter=2000,
         random_state=42,
         verbose=1,
-        tol=1e-6,
+        tol=1e-5,
         alpha_W=0.0,      
-        alpha_H=0.0,         # Start with 0 penalty to ensure it moves
+        alpha_H=0.001,       # Re-introduce tiny sparsity to keep atoms clean
         l1_ratio=1.0,
     )
     W = nmf.fit_transform(X_norm)   # [N, K] — object-to-atom weights
