@@ -11,6 +11,7 @@ Key fixes over v1:
 """
 
 import torch
+import torch.nn.functional as F
 import numpy as np
 from sklearn.decomposition import NMF
 import matplotlib.pyplot as plt
@@ -114,9 +115,7 @@ def analyze_basis(library_path, n_components=1024):
     H_tensor = torch.from_numpy(H).float()   # [1024, 2025]
     X_tensor = torch.from_numpy(X_norm).float()
 
-    accs = []
-    for i in range(min(1000, X_tensor.shape[0])):
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     # ── Simple nearest-neighbour lookup audit ──
     # (reconstruct each object using top-5 atoms from the codebook)
