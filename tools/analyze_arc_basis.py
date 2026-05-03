@@ -116,31 +116,38 @@ def analyze_basis(library_path, n_components=1024):
 
     accs = []
     for i in range(min(1000, X_tensor.shape[0])):
-        obj  = X_tensor[i]                              # [2025]
-        dist = ((H_tensor - obj.unsqueeze(0)) ** 2).sum(dim=1)
-        top5 = dist.topk(5, largest=False).indices
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    # ── Simple nearest-neighbour lookup audit ──
+    # (reconstruct each object using top-5 atoms from the codebook)
+    oh_full  = F.one_hot(torch.from_numpy(denoised_tensors).long(), num_classes=10).float()
+    # Apply the same 0.1 weighting to channel 0 for the audit
+    oh_weighted = oh_full.clone()
+    oh_weighted[:, :, :, 0] *= 0.1
+    X_audit = oh_weighted.reshape(oh_full.shape[0], -1).to(device)
 
-        dists_k = dist[top5]
-        weights  = 1.0 / (dists_k + 1e-8)
-        weights  = weights / weights.sum()
-        recon    = (H_tensor[top5] * weights.unsqueeze(1)).sum(dim=0)   # [2025]
+    H_torch = torch.from_numpy(H).to(device)
+    dists   = torch.cdist(X_audit, H_torch)
+    best_k  = dists.topk(5, largest=False).indices
 
-        # Pixel accuracy: recon is [2025] = 15×15×9 (foreground channels)
-        # Argmax over 9 channels + 1 implicit background gives 10-way prediction
-        recon_9ch  = recon.view(15, 15, 9)                # [15, 15, 9]
-        # Add a background channel (all zeros → background wins if no foreground)
-        bg_channel = torch.zeros(15, 15, 1)               # implicit black
-        recon_10ch = torch.cat([bg_channel, recon_9ch], dim=-1)  # [15, 15, 10]
-        recon_grid = recon_10ch.argmax(dim=-1)            # [15, 15]  colors 0-9
+    # Reconstruction: average of top 5 atoms
+    # Weight them by inverse distance for a better audit
+    weights = 1.0 / (dists.gather(1, best_k) + 1e-8)
+    weights = weights / weights.sum(dim=1, keepdim=True)
+    
+    # [N, 5, 1] * [N, 5, 2250] -> [N, 2250]
+    recon_flat = (H_torch[best_k] * weights.unsqueeze(2)).sum(dim=1)
+    recon_10ch = recon_flat.view(-1, 15, 15, 10)
+    
+    # Before argmax, un-weight the background channel to get true colors
+    recon_viz = recon_10ch.clone()
+    recon_viz[:, :, :, 0] *= 10.0
+    
+    recon_grid = recon_viz.argmax(dim=-1).cpu().numpy()
+    px_acc = (recon_grid == denoised_tensors).mean() * 100
+    print(f"\nQuick audit (K=5) pixel accuracy: {px_acc:.1f}%")
 
-        # Original grid from tensors
-        orig_idx = i % tensors.shape[0]
-        orig_grid = torch.from_numpy(tensors[orig_idx].astype(np.int64))
-        acc = (recon_grid == orig_grid).float().mean().item() * 100
-        accs.append(acc)
-
-    mean_acc = np.mean(accs)
-    print(f"  Mean pixel accuracy (K=5): {mean_acc:.1f}%")
+    mean_acc = px_acc
     if mean_acc >= 75:
         print(f"  ✅ Codebook quality: GOOD")
     elif mean_acc >= 50:
