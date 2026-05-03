@@ -113,15 +113,15 @@ def analyze_basis(library_path, n_components=1024):
 
     nmf = NMF(
         n_components=n_components,
-        init='random',
-        solver='cd',         # CD is faster for the 'polishing' phase
+        init='nndsvda',      # Use smart init now that raw data prevents paralysis
+        solver='cd',
         beta_loss='frobenius', 
         max_iter=2000,
         random_state=42,
         verbose=1,
         tol=1e-5,
         alpha_W=0.0,      
-        alpha_H=0.001,       # Re-introduce tiny sparsity to keep atoms clean
+        alpha_H=0.001,       # Tiny sparsity to keep atoms clean
         l1_ratio=1.0,
     )
     W = nmf.fit_transform(X_norm)   # [N, K] — object-to-atom weights
@@ -142,36 +142,29 @@ def analyze_basis(library_path, n_components=1024):
     print("\nRunning quick reconstruction audit (K=5 nearest atoms)...")
     H_tensor = torch.from_numpy(H).float()   # [1024, 2025]
     X_tensor = torch.from_numpy(X_norm).float()
-
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     # ── Simple nearest-neighbour lookup audit ──
     # (reconstruct each object using top-5 atoms from the codebook)
     oh_full  = F.one_hot(torch.from_numpy(denoised_tensors).long(), num_classes=10).float()
-    # Apply the same 0.1 weighting to channel 0 for the audit
-    oh_weighted = oh_full.clone()
-    oh_weighted[:, :, :, 0] *= 0.1
-    X_audit = oh_weighted.reshape(oh_full.shape[0], -1).to(device)
+    
+    # MATCH THE TRAINER: Use raw 1.0 values for the audit lookup
+    X_audit = oh_full.reshape(oh_full.shape[0], -1).to(device)
 
     H_torch = torch.from_numpy(H).to(device)
+    # Use vectorized cdist for speed
     dists   = torch.cdist(X_audit, H_torch)
     best_k  = dists.topk(5, largest=False).indices
 
     # Reconstruction: average of top 5 atoms
-    # Weight them by inverse distance for a better audit
-    weights = 1.0 / (dists.gather(1, best_k) + 1e-8)
-    weights = weights / weights.sum(dim=1, keepdim=True)
-    
-    # [N, 5, 1] * [N, 5, 2250] -> [N, 2250]
-    recon_flat = (H_torch[best_k] * weights.unsqueeze(2)).sum(dim=1)
+    # We use a simple average for the audit to see if the atoms exist
+    recon_flat = H_torch[best_k].mean(dim=1)  # [N, 2250]
     recon_10ch = recon_flat.view(-1, 15, 15, 10)
-    
-    # Before argmax, un-weight the background channel to get true colors
-    recon_viz = recon_10ch.clone()
-    recon_viz[:, :, :, 0] *= 10.0
-    
-    recon_grid = recon_viz.argmax(dim=-1).cpu().numpy()
-    px_acc = (recon_grid == denoised_tensors).mean() * 100
+    recon_grids = recon_10ch.argmax(dim=-1)   # [N, 15, 15]
+
+    # Calculate pixel accuracy
+    correct = (recon_grids == torch.from_numpy(denoised_tensors).to(device)).float()
+    px_acc = correct.mean().item() * 100
     print(f"\nQuick audit (K=5) pixel accuracy: {px_acc:.1f}%")
 
     mean_acc = px_acc
