@@ -60,11 +60,13 @@ def reconstruct_from_atoms(obj_flat, atoms, k):
     weights = 1.0 / (best_dists + 1e-8)
     weights = weights / weights.sum()
 
-    recon = (atoms[best_k] * weights.unsqueeze(1)).sum(dim=0)    # [2250]
-    # Atoms are [2250] = 15×15×10 one-hot color
-    color_logits = recon.view(15, 15, 10)   # [15, 15, 10]
-    recon_grid   = color_logits.argmax(dim=-1)   # [15, 15]
-
+    recon = (atoms[best_k] * weights.unsqueeze(1)).sum(dim=0)    # [2025]
+    # 2025 = 15×15×9 (foreground colors 1–9, color 0 excluded)
+    # Add implicit background channel so argmax gives 10-way color prediction
+    recon_9ch  = recon.view(15, 15, 9)
+    bg_channel = torch.zeros(15, 15, 1, device=recon.device)
+    recon_10ch = torch.cat([bg_channel, recon_9ch], dim=-1)  # [15,15,10]
+    recon_grid = recon_10ch.argmax(dim=-1)                   # [15,15] values 0–9
     return recon_grid, best_k, weights
 
 # ── Main audit ────────────────────────────────────────────────────────────────
@@ -92,14 +94,14 @@ def audit_codebook(k=5, n_visualize=8, library_path='arc_data/primitive_library.
 
     for i in range(len(dataset)):
         item  = dataset[i]
-        state = item['state'].squeeze(0).long()   # [15, 15] int grid
+        state = item['state'].squeeze(0).long()   # [15, 15]
 
-        # Match the encoding in analyze_arc_basis.py v2:
-        # 10-channel one-hot color only, no position channels → 2250 dims
-        oh       = F.one_hot(state, num_classes=10).float()   # [15, 15, 10]
-        obj_flat = oh.view(-1).to(device)                     # [2250]
-        # L1 normalize to match NMF training
-        obj_flat = obj_flat / (obj_flat.sum() + 1e-8)
+        # Foreground-only encoding: 9 channels (colors 1–9), background excluded
+        # Must match analyze_arc_basis.py encoding exactly
+        oh_full  = F.one_hot(state, num_classes=10).float()  # [15, 15, 10]
+        obj_9ch  = oh_full[:, :, 1:]                         # [15, 15, 9] drop color-0
+        obj_flat = obj_9ch.reshape(-1).to(device)            # [2025]
+        obj_flat = obj_flat / (obj_flat.sum() + 1e-8)        # L1 normalize
 
         recon_grid, best_k, _ = reconstruct_from_atoms(obj_flat, atoms, k)
 
@@ -183,8 +185,9 @@ def audit_codebook(k=5, n_visualize=8, library_path='arc_data/primitive_library.
         for i in range(0, min(500, len(dataset)), 1):
             item     = dataset[i]
             state    = item['state'].squeeze(0).long()
-            oh       = F.one_hot(state, num_classes=10).float()
-            obj_flat = oh.view(-1).to(device)
+            oh_full  = F.one_hot(state, num_classes=10).float()
+            obj_9ch  = oh_full[:, :, 1:]                      # drop color-0
+            obj_flat = obj_9ch.reshape(-1).to(device)         # [2025]
             obj_flat = obj_flat / (obj_flat.sum() + 1e-8)
             recon_g, _, _ = reconstruct_from_atoms(obj_flat, atoms, test_k)
             sample_accs.append((recon_g.cpu() == state).float().mean().item() * 100)

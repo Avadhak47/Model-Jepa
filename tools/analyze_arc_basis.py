@@ -78,13 +78,13 @@ def analyze_basis(library_path, n_components=1024):
 
     nmf = NMF(
         n_components=n_components,
-        init='nndsvda',     # Better init than 'random' — uses SVD approximation
-        solver='mu',        # Multiplicative update (better for sparse data)
-        beta_loss='kullback-leibler',   # KL divergence better for one-hot data than Frobenius
-        max_iter=500,       # 500 is enough — error plateaus after ~400 on this dataset
+        init='nndsvda',
+        solver='mu',
+        beta_loss='kullback-leibler',
+        max_iter=800,       # Run longer — was stopping at epoch 80 due to loose tol
         random_state=42,
         verbose=1,
-        tol=1e-3,           # Stop early if improvement drops below this threshold
+        tol=1e-6,           # Tight tol — let it converge fully, not stop early
     )
     W = nmf.fit_transform(X_norm)   # [N, K] — object-to-atom weights
     H = nmf.components_             # [K, 2250] — the atoms
