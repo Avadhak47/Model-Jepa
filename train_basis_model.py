@@ -82,13 +82,12 @@ class AlgebraicDecoder(nn.Module):
       → In the backward pass, gradients flow through encoder slot features
     - This decoder now has full access to color information!
     """
-    def __init__(self, n_slots=5, basis_dim=2700):
+    def __init__(self, n_slots=5, basis_dim=2025):
         super().__init__()
         self.n_slots   = n_slots
         self.basis_dim = basis_dim
 
         # K slots × basis_dim → pixel-wise color logits
-        # Use per-slot processing then combine, for better capacity
         self.slot_net = nn.Sequential(
             nn.Linear(basis_dim, 512),
             nn.LayerNorm(512),
@@ -109,7 +108,7 @@ class AlgebraicDecoder(nn.Module):
         )
 
     def forward(self, q_st):
-        # q_st: [B, K, 2700]
+        # q_st: [B, K, basis_dim]
         b, k, _ = q_st.shape
         per_slot = self.slot_net(q_st)              # [B, K, 256]
         combined = per_slot.view(b, k * 256)         # [B, K*256]
@@ -145,7 +144,9 @@ def train():
     vq      = BasisVQ(basis_path='arc_data/arc_basis_nmf_1024.pt',
                       d_model=cfg['d_model'],
                       n_basis=cfg['n_basis']).to(device)
-    decoder = AlgebraicDecoder(n_slots=cfg['k_slots']).to(device)
+    
+    decoder = AlgebraicDecoder(n_slots=cfg['k_slots'], 
+                               basis_dim=vq.basis_dim).to(device)
 
     # Train encoder + VQ projection + decoder
     optimizer = optim.AdamW(
@@ -182,7 +183,7 @@ def train():
 
             # ── Forward ──
             slot_features              = encoder(x_onehot)              # [B, K, d_model]
-            q_st, indices, vq_loss, entropy = vq(slot_features)         # [B, K, 2700]
+            q_st, indices, vq_loss, entropy = vq(slot_features)         # [B, K, basis_dim]
             color_logits, shape_logits = decoder(q_st)                  # [B, 10/1, 15, 15]
 
             # ── Losses ──
