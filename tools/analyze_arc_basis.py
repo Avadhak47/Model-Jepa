@@ -185,4 +185,5 @@ def analyze_basis(library_path, n_components=1024):
     print("\nDone. Re-run audit_codebook.py to verify quality.")
 
 if __name__ == "__main__":
-    analyze_basis('arc_data/primitive_library.pt', n_components=2048)
+    # n_components must be <= 2025 for 'nndsvda' initialization
+    analyze_basis('arc_data/primitive_library.pt', n_components=1024)
