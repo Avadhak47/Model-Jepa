@@ -38,35 +38,37 @@ cmap = ListedColormap(ARC_COLORS)
 
 # ── Helper: reconstruct from K nearest atoms ──────────────────────────────────
 
-def reconstruct_from_atoms(obj_flat, atoms, k):
+def reconstruct_from_atoms(obj_grid, atoms, k):
     """
-    obj_flat: [2250]  — flattened object (15×15×10 one-hot color)
-    atoms:    [1024, 2250]  — NMF basis (same encoding)
+    obj_grid: [15, 15] — original object
+    atoms:    [1024, 2250]  — NMF basis (15×15×10 one-hot)
     k:        int  — number of atoms to use
-
-    Returns:
-        recon_grid: [15, 15]  — reconstructed color grid (argmax of summed atoms)
-        best_atom_ids: [k]    — which atoms were selected
-        px_acc: float         — pixel accuracy vs original
     """
-    # L2 distance to all atoms
+    # oh: [15, 15, 10]
+    oh = F.one_hot(torch.from_numpy(obj_grid).long(), num_classes=10).float()
+    
+    # Apply the same 0.1 weighting to channel 0 (black) as the NMF trainer
+    oh_weighted = oh.clone()
+    oh_weighted[:, :, 0] *= 0.1
+    obj_flat = oh_weighted.view(-1)  # [2250]
+
+    # atoms: [1024, 2250]
     dists = ((atoms - obj_flat.unsqueeze(0)) ** 2).sum(dim=1)   # [1024]
-    best_k = dists.topk(k, largest=False).indices                # [k] — nearest atoms
+    best_k = dists.topk(k, largest=False).indices
 
-    # Weighted reconstruction: sum of K nearest atoms
-    # Weight each atom inversely by its distance (soft combination)
-    best_dists = dists[best_k]
-    # Use non-negative weights proportional to inverse distance
-    weights = 1.0 / (best_dists + 1e-8)
+    # Weight by inverse distance
+    weights = 1.0 / (dists[best_k] + 1e-8)
     weights = weights / weights.sum()
-
-    recon = (atoms[best_k] * weights.unsqueeze(1)).sum(dim=0)    # [2025]
-    # 2025 = 15×15×9 (foreground colors 1–9, color 0 excluded)
-    # Add implicit background channel so argmax gives 10-way color prediction
-    recon_9ch  = recon.view(15, 15, 9)
-    bg_channel = torch.zeros(15, 15, 1, device=recon.device)
-    recon_10ch = torch.cat([bg_channel, recon_9ch], dim=-1)  # [15,15,10]
-    recon_grid = recon_10ch.argmax(dim=-1)                   # [15,15] values 0–9
+    
+    # Reconstruction: [2250]
+    recon_flat = (atoms[best_k] * weights.unsqueeze(1)).sum(dim=0)
+    recon_10ch = recon_flat.view(15, 15, 10)
+    
+    # Un-weight for argmax
+    recon_viz = recon_10ch.clone()
+    recon_viz[:, :, 0] *= 10.0
+    recon_grid = recon_viz.argmax(dim=-1).cpu().numpy()
+    
     return recon_grid, best_k, weights
 
 # ── Main audit ────────────────────────────────────────────────────────────────

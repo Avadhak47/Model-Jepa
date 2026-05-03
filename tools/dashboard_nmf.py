@@ -14,30 +14,33 @@ cmap = ListedColormap(ARC_COLORS)
 
 @st.cache_resource
 def load_nmf_data():
-    # Use weights_only=False for local trusted files if needed, 
-    # but torch.load default is changing in 2.6
-    data = torch.load('arc_data/arc_basis_nmf_200.pt', weights_only=False)
-    basis = data['basis'].numpy() # [200, 2700]
-    weights = data['weights'].numpy() # [N, 200]
+    path = 'arc_data/arc_basis_nmf_1024.pt'
+    data = torch.load(path, weights_only=False)
+    basis = data['basis'].numpy()       # [1024, 2250]
+    weights = data['weights'].numpy()   # [N, 1024]
     return basis, weights
 
 def plot_atom(atom_flat, threshold=0.1, title=""):
-    atom = atom_flat.reshape(15, 15, 12)
-    color_data = atom[:, :, :10]
+    # Reshape to [15, 15, 10]
+    atom = atom_flat.reshape(15, 15, 10)
+    
+    # UN-WEIGHT the background channel (color 0) which was 0.1x in training
+    atom_viz = atom.copy()
+    atom_viz[:, :, 0] *= 10.0
     
     # Adaptive Masking
-    intensities = np.max(color_data, axis=-1)
-    # If a threshold is provided, use it. Otherwise use percentile.
+    intensities = np.max(atom_viz, axis=-1)
+    
     if threshold is None:
         actual_thresh = np.percentile(intensities, 95)
     else:
         actual_thresh = threshold * np.max(intensities) if np.max(intensities) > 0 else 0
         
-    grid = np.argmax(color_data, axis=-1)
+    grid = np.argmax(atom_viz, axis=-1)
     grid[intensities <= max(1e-5, actual_thresh)] = 0
     
     fig, ax = plt.subplots(figsize=(2, 2))
-    ax.imshow(grid, cmap=cmap, vmin=0, vmax=9)
+    ax.imshow(grid, cmap=cmap, vmin=0, vmax=9, interpolation='nearest')
     ax.axis('off')
     if title:
         ax.set_title(title, fontsize=8)
@@ -56,9 +59,10 @@ def main():
     tabs = st.tabs(["📚 Basis Library", "🧪 Synthesis Lab", "🔍 Decomposition"])
     
     with tabs[0]:
-        st.header("The 200 Atoms of ARC")
+        st.header("The 1024 Atoms of ARC")
         items_per_page = 40
-        page = st.number_input("Page", min_value=1, max_value=5, value=1)
+        n_pages = (n_components // items_per_page) + 1
+        page = st.number_input("Page", min_value=1, max_value=n_pages, value=1)
         
         start_idx = (page - 1) * items_per_page
         end_idx = min(start_idx + items_per_page, n_components)
