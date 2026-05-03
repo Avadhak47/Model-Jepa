@@ -39,17 +39,16 @@ def load_model(checkpoint_path):
     ckpt   = torch.load(checkpoint_path, map_location=device, weights_only=False)
     cfg    = ckpt['cfg']
 
-    encoder = BasisEncoder(k_slots=cfg['k_slots'], d_model=cfg['d_model'],
-                           n_basis=cfg['n_basis']).to(device)
+    encoder = BasisEncoder(k_slots=cfg['k_slots'], d_model=cfg['d_model']).to(device)
     encoder.load_state_dict(ckpt['encoder'])
     encoder.eval()
 
-    vq = BasisVQ(basis_path='arc_data/arc_basis_nmf_1024.pt').to(device)
-    vq.temperature = 0.01   # Near-zero → fully discrete hard argmax
+    vq = BasisVQ(basis_path='arc_data/arc_basis_nmf_1024.pt', d_model=cfg['d_model']).to(device)
+    vq.slot_proj.load_state_dict(ckpt['vq_proj'])
     vq.eval()
 
-    decoder = AlgebraicDecoder(n_slots=cfg['k_slots']).to(device)
-    decoder.load_state_dict(ckpt['decoder'])   # ← Load TRAINED decoder weights
+    decoder = AlgebraicDecoder(n_slots=cfg['k_slots'], basis_dim=vq.basis_dim).to(device)
+    decoder.load_state_dict(ckpt['decoder'])
     decoder.eval()
 
     print(f"[Loaded] {checkpoint_path}  |  epoch={ckpt.get('epoch','?')}")
@@ -65,9 +64,9 @@ def visualize_reconstructions(encoder, vq, decoder, cfg, device, n_samples=8):
     x_onehot = F.one_hot(state.squeeze(1).long(), 10).permute(0,3,1,2).float()
 
     with torch.no_grad():
-        logits               = encoder(x_onehot)
-        c_m, p_m, indices, _ = vq(logits)
-        col_logits, _        = decoder(c_m, p_m)   # ← TRAINED decoder
+        slots = encoder(x_onehot)
+        q_st, indices, _, _ = vq(slots)
+        col_logits, _ = decoder(q_st)
         recons = col_logits.argmax(dim=1).cpu().numpy()
 
     originals = state.squeeze(1).cpu().numpy()
@@ -90,10 +89,13 @@ def visualize_reconstructions(encoder, vq, decoder, cfg, device, n_samples=8):
 
         for k in range(k_slots):
             atom_id   = indices[i, k]
-            atom      = vq.color_basis[atom_id].view(15, 15, 10).cpu().numpy()
-            atom_grid = np.argmax(atom, axis=-1)
-            intensity = np.max(atom, axis=-1)
-            atom_grid[intensity < 0.05] = 0   # mask near-zero → black
+            # De-project atom from 2025-dim to 15x15x9
+            atom_vec = vq.embed[atom_id].view(15, 15, 9).cpu().numpy()
+            # Add bg channel for visualization
+            atom_10ch = np.concatenate([np.zeros((15, 15, 1)), atom_vec], axis=-1)
+            atom_grid = np.argmax(atom_10ch, axis=-1)
+            intensity = np.max(atom_vec, axis=-1)
+            atom_grid[intensity < 0.1] = 0   # mask near-zero → black
 
             axes[i, 2+k].imshow(atom_grid, cmap=cmap, vmin=0, vmax=9, interpolation='nearest')
             axes[i, 2+k].set_title(f"S{k}: #{atom_id}", fontsize=7)
@@ -125,11 +127,11 @@ def extract_all_tokens(encoder, vq, decoder, cfg, device):
             state = batch['state'].to(device)
             x_oh  = F.one_hot(state.squeeze(1).long(), 10).permute(0,3,1,2).float()
 
-            logits               = encoder(x_oh)
-            c_m, p_m, indices, _ = vq(logits)
+            slots = encoder(x_oh)
+            q_st, indices, _, _ = vq(slots)
 
             # ── TRAINED decoder — weights loaded from checkpoint ──
-            col_logits, _  = decoder(c_m, p_m)
+            col_logits, _  = decoder(q_st)
             preds          = col_logits.argmax(dim=1)    # [B, 15, 15]
             correct_px    += (preds == state.squeeze(1)).sum().item()
             total_px      += state.squeeze(1).numel()
