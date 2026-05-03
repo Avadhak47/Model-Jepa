@@ -164,15 +164,19 @@ def analyze_basis(library_path, n_components=1024):
 
     for i, idx in enumerate(sample_ids):
         ax = axes[i // 3, i % 3]
-        atom = H[idx].reshape(15, 15, 9)    # [15, 15, 9] foreground channels
-        # Add implicit background channel so argmax gives colors 0-9
-        atom_10ch = np.concatenate([np.zeros((15, 15, 1)), atom], axis=-1)
+        atom     = H[idx].reshape(15, 15, 9)     # [15, 15, 9] foreground channels
+        # Add implicit background channel (value=0) so argmax gives colors 0–9
+        atom_10ch = np.concatenate([np.zeros((15, 15, 1)), atom], axis=-1)   # [15, 15, 10]
         grid      = np.argmax(atom_10ch, axis=-1)   # [15, 15]
-        intensity = np.max(atom_10ch, axis=-1)
-        grid[intensity < 0.1] = 0   # mask weak activations → black
+        intensity = np.max(atom, axis=-1)            # [15, 15]  max over 9 foreground channels
+
+        # Relative threshold: only show pixels above 20% of this atom's own peak
+        # (absolute 0.1 was too aggressive — made most atoms appear all-black)
+        thresh = np.max(intensity) * 0.20
+        grid[intensity < thresh] = 0   # mask low-activation pixels → black
 
         ax.imshow(grid, cmap=cmap, vmin=0, vmax=9, interpolation='nearest')
-        ax.set_title(f"Atom #{idx}", fontsize=9)
+        ax.set_title(f"Atom #{idx} (max={np.max(intensity):.2f})", fontsize=9)
         ax.axis('off')
 
     plt.tight_layout()

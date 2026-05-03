@@ -21,8 +21,8 @@ class BasisVQ(nn.Module):
         data  = torch.load(basis_path, weights_only=False)
         basis = data['basis']   # [1024, 2700]
 
-        self.num_codes = basis.shape[0]       # 1024
-        self.basis_dim = basis.shape[1]       # 2700
+        self.num_codes = basis.shape[0]
+        self.basis_dim = basis.shape[1]       
         self.d_model   = d_model
         self.decay     = decay                # EMA decay rate (0.99 = slow, stable update)
         self.epsilon   = epsilon              # Laplace smoothing
@@ -34,9 +34,9 @@ class BasisVQ(nn.Module):
         # embed: the actual atom vectors (updated via EMA, not gradient)
         # cluster_size: EMA count of how many encoder outputs map to each atom
         # embed_avg: EMA sum of encoder outputs per atom (used to compute new embed)
-        self.register_buffer('embed',        basis.clone())        # [1024, 2700]
+        self.register_buffer('embed',        basis.clone())        # [num_codes, basis_dim]
         self.register_buffer('cluster_size', torch.ones(self.num_codes))
-        self.register_buffer('embed_avg',    basis.clone())        # [1024, 2700]
+        self.register_buffer('embed_avg',    basis.clone())        # [num_codes, basis_dim]
 
         # Usage tracking
         self.register_buffer('usage_counts', torch.zeros(self.num_codes))
@@ -45,16 +45,16 @@ class BasisVQ(nn.Module):
     def _ema_update(self, z_flat, indices_flat):
         """
         Update codebook atoms via EMA given the encoder outputs of this batch.
-        z_flat:       [B*K, 2700]  — projected encoder slots
-        indices_flat: [B*K]        — which atom each slot mapped to
+        z_flat:       [B*K, D]  — projected encoder slots
+        indices_flat: [B*K]     — which atom each slot mapped to
         """
         # One-hot encoding of assignments: [B*K, 1024]
         one_hot = F.one_hot(indices_flat, num_classes=self.num_codes).float()
 
         # Count how many encoder outputs mapped to each atom this batch
-        batch_cluster_size = one_hot.sum(dim=0)                        # [1024]
+        batch_cluster_size = one_hot.sum(dim=0)                        # [num_codes]
         # Sum of encoder outputs per atom
-        batch_embed_sum = one_hot.T @ z_flat                           # [1024, 2700]
+        batch_embed_sum = one_hot.T @ z_flat                           # [num_codes, basis_dim]
 
         # EMA update
         self.cluster_size = (
@@ -78,16 +78,16 @@ class BasisVQ(nn.Module):
         slot_features: [B, K, d_model]  — raw encoder slot features
 
         Returns:
-            q_st:    [B, K, 2700]  — straight-through for decoder
-            indices: [B, K]        — atom IDs (the symbolic tokens)
-            vq_loss: scalar        — commitment loss (encoder toward atom)
-            entropy: scalar        — diversity bonus
+            q_st:    [B, K, basis_dim] — straight-through for decoder
+            indices: [B, K]            — atom IDs (the symbolic tokens)
+            vq_loss: scalar            — commitment loss (encoder toward atom)
+            entropy: scalar            — diversity bonus
         """
         b, k, _ = slot_features.shape
 
         # Project encoder slots into codebook space
-        z_e   = self.slot_proj(slot_features)      # [B, K, 2700]
-        z_flat = z_e.view(b * k, self.basis_dim)   # [B*K, 2700]
+        z_e   = self.slot_proj(slot_features)      # [B, K, basis_dim]
+        z_flat = z_e.view(b * k, self.basis_dim)   # [B*K, basis_dim]
 
         # ── Nearest-neighbour lookup ──
         # ||z - e||^2 = ||z||^2 - 2*z·e + ||e||^2
@@ -104,12 +104,12 @@ class BasisVQ(nn.Module):
             self._ema_update(z_flat.detach(), indices_flat.detach())
 
         # ── Selected atom vectors (from updated codebook) ──
-        e_i = self.embed[indices_flat].view(b, k, self.basis_dim)   # [B, K, 2700]
+        e_i = self.embed[indices_flat].view(b, k, self.basis_dim)   # [B, K, basis_dim]
 
         # ── Straight-Through Estimator ──
         # Forward:  passes e_i to decoder (clean codebook vector)
         # Backward: gradient flows through z_e (encoder retains color info)
-        q_st = z_e + (e_i - z_e).detach()          # [B, K, 2700]
+        q_st = z_e + (e_i - z_e).detach()          # [B, K, basis_dim]
 
         # ── Commitment loss (encoder → atom, no atom gradient needed with EMA) ──
         vq_loss = F.mse_loss(z_e, e_i.detach())
