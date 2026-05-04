@@ -7,6 +7,9 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import numpy as np
 
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 from tools.extract_arc_objects import PrimitiveDataset
 from modules.basis_vq import BasisVQ
 
@@ -103,7 +106,16 @@ class AlgebraicDecoder(nn.Module):
             nn.Linear(512, 1024),
             nn.LayerNorm(1024),
             nn.GELU(),
-            nn.Linear(1024, 15 * 15 * 11), # 10 colors + 1 alpha mask
+            nn.Linear(1024, 1024),
+            nn.LayerNorm(1024),
+            nn.GELU(),
+            nn.Linear(1024, 2048),
+            nn.LayerNorm(2048),
+            nn.GELU(),
+            nn.Linear(2048, 2048),
+            nn.LayerNorm(2048),
+            nn.GELU(),
+            nn.Linear(2048, 15 * 15 * 11), # 10 colors + 1 alpha mask
         )
 
     def forward(self, q_st):

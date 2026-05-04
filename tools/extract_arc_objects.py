@@ -78,6 +78,24 @@ class ARCGrid:
                 if obj: extracted.append(obj)
         return extracted
 
+class PrimitiveDataset(Dataset):
+    def __init__(self, library_path: str):
+        if not os.path.exists(library_path):
+            raise FileNotFoundError(f"Library not found at {library_path}")
+            
+        payload = torch.load(library_path, weights_only=False)
+        self.tensors = payload["tensors"].float().unsqueeze(1) # [N, 1, 15, 15]
+        self.masks = payload["masks"]
+        self.colors = payload["colors"]
+        
+    def __len__(self): return len(self.tensors)
+    def __getitem__(self, idx):
+        return {
+            "state": self.tensors[idx], 
+            "valid_mask": self.masks[idx], 
+            "color_id": self.colors[idx]
+        }
+
 class ObjectNormalizer:
     def __init__(self, target_size: int = 15):
         self.target_size = target_size
