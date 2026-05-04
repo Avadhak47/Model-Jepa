@@ -139,7 +139,7 @@ def train():
         'batch_size':        128,
         'epochs':            500,       # v6 converges fast (no quantization noise)
         'lr':                5e-4,
-        'lambda_diversity':  1.0,       # Increased to fight collapse
+        'lambda_diversity':  2.0,       # Increased to fight collapse
         'lambda_shape':      1.0,       
         'dead_revive_every': 20,        # Reset more frequently
         'library_path':      'arc_data/primitive_library.pt'
